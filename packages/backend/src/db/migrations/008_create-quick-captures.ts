@@ -29,7 +29,7 @@ export async function up(pgm: MigrationBuilder): Promise<void> {
     status: {
       type: 'capture_status',
       notNull: true,
-      default: "'inbox'",
+      default: pgm.func("'inbox'"),
     },
     created_at: {
       type: 'timestamptz',

@@ -35,7 +35,7 @@ export async function up(pgm: MigrationBuilder): Promise<void> {
     },
     delivered_via: {
       type: 'varchar[]',
-      default: "'{in_app}'",
+      default: pgm.func("'{in_app}'"),
     },
     acknowledged_at: {
       type: 'timestamptz',

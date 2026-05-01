@@ -33,7 +33,7 @@ export async function up(pgm: MigrationBuilder): Promise<void> {
     sync_status: {
       type: 'sync_status',
       notNull: true,
-      default: "'never_synced'",
+      default: pgm.func("'never_synced'"),
     },
     sync_error: {
       type: 'text',

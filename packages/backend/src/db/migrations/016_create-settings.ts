@@ -24,11 +24,11 @@ export async function up(pgm: MigrationBuilder): Promise<void> {
     model_routing_preference: {
       type: 'model_routing_preference',
       notNull: true,
-      default: "'auto'",
+      default: pgm.func("'auto'"),
     },
     quiet_period_thresholds: {
       type: 'jsonb',
-      default: "'{\"gentle\":3,\"warm\":7,\"direct\":14}'",
+      default: pgm.func("'{\"gentle\":3,\"warm\":7,\"direct\":14}'"),
     },
     stale_corpus_threshold_days: {
       type: 'integer',

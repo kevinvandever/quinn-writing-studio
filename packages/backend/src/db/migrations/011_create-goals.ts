@@ -47,7 +47,7 @@ export async function up(pgm: MigrationBuilder): Promise<void> {
     status: {
       type: 'goal_status',
       notNull: true,
-      default: "'active'",
+      default: pgm.func("'active'"),
     },
     behind_threshold: {
       type: 'float',

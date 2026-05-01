@@ -10,7 +10,7 @@
     "start": "node dist/server.js",
     "typecheck": "tsc --noEmit",
     "migrate": "node-pg-migrate",
-    "migrate:up": "node-pg-migrate up --migrations-dir src/db/migrations --envPath .env",
+    "migrate:up": "NODE_OPTIONS='--import tsx/esm' node-pg-migrate up --migrations-dir src/db/migrations --envPath .env",
     "seed": "tsx src/db/seed.ts"
   },
   "engines": {

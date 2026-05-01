@@ -47,7 +47,7 @@ export async function up(pgm: MigrationBuilder): Promise<void> {
     status: {
       type: 'intelligence_status',
       notNull: true,
-      default: "'new'",
+      default: pgm.func("'new'"),
     },
     published_at: {
       type: 'timestamptz',

@@ -26,7 +26,7 @@ export async function up(pgm: MigrationBuilder): Promise<void> {
     status: {
       type: 'promptly_status',
       notNull: true,
-      default: "'selected'",
+      default: pgm.func("'selected'"),
     },
     substack_post_id: {
       type: 'varchar(255)',

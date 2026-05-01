@@ -6,6 +6,7 @@
 
 import { Router, Request, Response } from 'express';
 import { requireAuth } from '../middleware/auth.middleware.js';
+import { asyncHandler } from '../middleware/async-handler.js';
 import { AppError, ErrorCodes } from '../middleware/error-handler.middleware.js';
 import { query } from '../db/connection.js';
 
@@ -18,7 +19,7 @@ router.use(requireAuth);
  * GET /api/projects/:id/goals
  * List all goals for a specific project.
  */
-router.get('/projects/:id/goals', async (req: Request, res: Response) => {
+router.get('/projects/:id/goals', asyncHandler(async (req: Request, res: Response) => {
   const userId = req.user!.userId;
   const projectId = req.params.id;
 
@@ -55,13 +56,13 @@ router.get('/projects/:id/goals', async (req: Request, res: Response) => {
   );
 
   res.json({ goals: result.rows });
-});
+}));
 
 /**
  * POST /api/projects/:id/goals
  * Create a new goal for a project.
  */
-router.post('/projects/:id/goals', async (req: Request, res: Response) => {
+router.post('/projects/:id/goals', asyncHandler(async (req: Request, res: Response) => {
   const userId = req.user!.userId;
   const projectId = req.params.id;
   const { goal_type, title, target_value, target_unit, period, behind_threshold, due_date } = req.body;
@@ -123,13 +124,13 @@ router.post('/projects/:id/goals', async (req: Request, res: Response) => {
   );
 
   res.status(201).json({ goal: result.rows[0] });
-});
+}));
 
 /**
  * PUT /api/goals/:id
  * Update an existing goal.
  */
-router.put('/goals/:id', async (req: Request, res: Response) => {
+router.put('/goals/:id', asyncHandler(async (req: Request, res: Response) => {
   const userId = req.user!.userId;
   const goalId = req.params.id;
   const { title, target_value, current_value, status, behind_threshold, due_date } = req.body;
@@ -152,15 +153,15 @@ router.put('/goals/:id', async (req: Request, res: Response) => {
   let paramIndex = 1;
 
   if (title !== undefined) {
-    updates.push(`title = $${paramIndex++}`);
+    updates.push(`title = ${paramIndex++}`);
     values.push(title);
   }
   if (target_value !== undefined) {
-    updates.push(`target_value = $${paramIndex++}`);
+    updates.push(`target_value = ${paramIndex++}`);
     values.push(target_value);
   }
   if (current_value !== undefined) {
-    updates.push(`current_value = $${paramIndex++}`);
+    updates.push(`current_value = ${paramIndex++}`);
     values.push(current_value);
   }
   if (status !== undefined) {
@@ -168,15 +169,15 @@ router.put('/goals/:id', async (req: Request, res: Response) => {
     if (!validStatuses.includes(status)) {
       throw new AppError(400, ErrorCodes.VALIDATION_ERROR, `status must be one of: ${validStatuses.join(', ')}`);
     }
-    updates.push(`status = $${paramIndex++}`);
+    updates.push(`status = ${paramIndex++}`);
     values.push(status);
   }
   if (behind_threshold !== undefined) {
-    updates.push(`behind_threshold = $${paramIndex++}`);
+    updates.push(`behind_threshold = ${paramIndex++}`);
     values.push(behind_threshold);
   }
   if (due_date !== undefined) {
-    updates.push(`due_date = $${paramIndex++}`);
+    updates.push(`due_date = ${paramIndex++}`);
     values.push(due_date);
   }
 
@@ -201,20 +202,20 @@ router.put('/goals/:id', async (req: Request, res: Response) => {
     due_date: Date | null;
   }>(
     `UPDATE goals SET ${updates.join(', ')}
-     WHERE id = $${paramIndex}
+     WHERE id = ${paramIndex}
      RETURNING id, project_id, goal_type, title, target_value, target_unit, period,
                current_value, status, behind_threshold, created_at, due_date`,
     values
   );
 
   res.json({ goal: result.rows[0] });
-});
+}));
 
 /**
  * GET /api/goals/dashboard
  * Unified dashboard showing all goals across all projects.
  */
-router.get('/goals/dashboard', async (req: Request, res: Response) => {
+router.get('/goals/dashboard', asyncHandler(async (req: Request, res: Response) => {
   const userId = req.user!.userId;
 
   const result = await query<{
@@ -257,6 +258,6 @@ router.get('/goals/dashboard', async (req: Request, res: Response) => {
       behindSchedule,
     },
   });
-});
+}));
 
 export const goalsRouter = router;

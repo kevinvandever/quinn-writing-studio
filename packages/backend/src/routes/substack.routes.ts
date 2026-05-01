@@ -7,6 +7,7 @@
 import { Router, Request, Response } from 'express';
 import { query } from '../db/connection.js';
 import { requireAuth } from '../middleware/auth.middleware.js';
+import { asyncHandler } from '../middleware/async-handler.js';
 import { AppError, ErrorCodes } from '../middleware/error-handler.middleware.js';
 import { syncSubstackPosts, type SubstackConnection } from '../services/substack-sync.service.js';
 
@@ -19,7 +20,7 @@ router.use(requireAuth);
  * POST /api/integrations/substack
  * Configure a Substack connection for a project.
  */
-router.post('/', async (req: Request, res: Response) => {
+router.post('/', asyncHandler(async (req: Request, res: Response) => {
   const userId = req.user!.userId;
   const { project_id, publication_url, publication_name, auth_cookies } = req.body;
 
@@ -71,13 +72,13 @@ router.post('/', async (req: Request, res: Response) => {
   }
 
   res.status(201).json({ connection });
-});
+}));
 
 /**
  * POST /api/integrations/substack/sync
  * Trigger a manual sync for a project's Substack connection.
  */
-router.post('/sync', async (req: Request, res: Response) => {
+router.post('/sync', asyncHandler(async (req: Request, res: Response) => {
   const userId = req.user!.userId;
   const { project_id } = req.body;
 
@@ -119,13 +120,13 @@ router.post('/sync', async (req: Request, res: Response) => {
       errors: result.errors,
     },
   });
-});
+}));
 
 /**
  * GET /api/integrations/substack/status
  * Get sync status for all Substack connections belonging to the user.
  */
-router.get('/status', async (req: Request, res: Response) => {
+router.get('/status', asyncHandler(async (req: Request, res: Response) => {
   const userId = req.user!.userId;
 
   const result = await query<{
@@ -145,6 +146,6 @@ router.get('/status', async (req: Request, res: Response) => {
   );
 
   res.json({ connections: result.rows });
-});
+}));
 
 export const substackRouter = router;

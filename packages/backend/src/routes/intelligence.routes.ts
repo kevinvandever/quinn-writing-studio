@@ -1,6 +1,7 @@
 import { Router, Request, Response } from 'express';
 import { query } from '../db/connection.js';
 import { requireAuth } from '../middleware/auth.middleware.js';
+import { asyncHandler } from '../middleware/async-handler.js';
 import { AppError, ErrorCodes } from '../middleware/error-handler.middleware.js';
 
 export const intelligenceRouter = Router();
@@ -13,7 +14,7 @@ intelligenceRouter.use(requireAuth);
 /**
  * List grant opportunities, filterable by status, sorted by deadline.
  */
-intelligenceRouter.get('/grants', async (req: Request, res: Response) => {
+intelligenceRouter.get('/grants', asyncHandler(async (req: Request, res: Response) => {
   const { status, limit = '50', offset = '0' } = req.query;
 
   let whereClause = `WHERE category = 'grant'`;
@@ -21,7 +22,7 @@ intelligenceRouter.get('/grants', async (req: Request, res: Response) => {
   let paramIdx = 1;
 
   if (status && typeof status === 'string') {
-    whereClause += ` AND status = $${paramIdx}`;
+    whereClause += ` AND status = ${paramIdx}`;
     params.push(status);
     paramIdx++;
   }
@@ -42,7 +43,7 @@ intelligenceRouter.get('/grants', async (req: Request, res: Response) => {
        deadline ASC,
        relevance_score DESC,
        discovered_at DESC
-     LIMIT $${paramIdx} OFFSET $${paramIdx + 1}`,
+     LIMIT ${paramIdx} OFFSET ${paramIdx + 1}`,
     [...params, parseInt(limit as string, 10), parseInt(offset as string, 10)]
   );
 
@@ -50,14 +51,14 @@ intelligenceRouter.get('/grants', async (req: Request, res: Response) => {
     items: result.rows,
     total: parseInt(countResult.rows[0]?.count || '0', 10),
   });
-});
+}));
 
 // ─── GET /api/intelligence/ai-news ──────────────────────────────────────────
 
 /**
  * List curated AI news items, sorted by relevance score.
  */
-intelligenceRouter.get('/ai-news', async (req: Request, res: Response) => {
+intelligenceRouter.get('/ai-news', asyncHandler(async (req: Request, res: Response) => {
   const { status, limit = '50', offset = '0' } = req.query;
 
   let whereClause = `WHERE category = 'ai_news'`;
@@ -65,7 +66,7 @@ intelligenceRouter.get('/ai-news', async (req: Request, res: Response) => {
   let paramIdx = 1;
 
   if (status && typeof status === 'string') {
-    whereClause += ` AND status = $${paramIdx}`;
+    whereClause += ` AND status = ${paramIdx}`;
     params.push(status);
     paramIdx++;
   }
@@ -81,7 +82,7 @@ intelligenceRouter.get('/ai-news', async (req: Request, res: Response) => {
      FROM intelligence_items
      ${whereClause}
      ORDER BY relevance_score DESC, discovered_at DESC
-     LIMIT $${paramIdx} OFFSET $${paramIdx + 1}`,
+     LIMIT ${paramIdx} OFFSET ${paramIdx + 1}`,
     [...params, parseInt(limit as string, 10), parseInt(offset as string, 10)]
   );
 
@@ -89,14 +90,14 @@ intelligenceRouter.get('/ai-news', async (req: Request, res: Response) => {
     items: result.rows,
     total: parseInt(countResult.rows[0]?.count || '0', 10),
   });
-});
+}));
 
 // ─── PUT /api/intelligence/ai-news/:id ──────────────────────────────────────
 
 /**
  * Update the status of an AI news item.
  */
-intelligenceRouter.put('/ai-news/:id', async (req: Request, res: Response) => {
+intelligenceRouter.put('/ai-news/:id', asyncHandler(async (req: Request, res: Response) => {
   const { id } = req.params;
   const { status } = req.body;
 
@@ -118,14 +119,14 @@ intelligenceRouter.put('/ai-news/:id', async (req: Request, res: Response) => {
   }
 
   res.json(result.rows[0]);
-});
+}));
 
 // ─── GET /api/intelligence/publishing ────────────────────────────────────────
 
 /**
  * List publishing intelligence items, sorted by date relevance.
  */
-intelligenceRouter.get('/publishing', async (req: Request, res: Response) => {
+intelligenceRouter.get('/publishing', asyncHandler(async (req: Request, res: Response) => {
   const { status, subcategory, limit = '50', offset = '0' } = req.query;
 
   let whereClause = `WHERE category = 'publishing'`;
@@ -133,13 +134,13 @@ intelligenceRouter.get('/publishing', async (req: Request, res: Response) => {
   let paramIdx = 1;
 
   if (status && typeof status === 'string') {
-    whereClause += ` AND status = $${paramIdx}`;
+    whereClause += ` AND status = ${paramIdx}`;
     params.push(status);
     paramIdx++;
   }
 
   if (subcategory && typeof subcategory === 'string') {
-    whereClause += ` AND subcategory = $${paramIdx}`;
+    whereClause += ` AND subcategory = ${paramIdx}`;
     params.push(subcategory);
     paramIdx++;
   }
@@ -158,7 +159,7 @@ intelligenceRouter.get('/publishing', async (req: Request, res: Response) => {
        CASE WHEN deadline IS NOT NULL THEN 0 ELSE 1 END,
        deadline ASC,
        discovered_at DESC
-     LIMIT $${paramIdx} OFFSET $${paramIdx + 1}`,
+     LIMIT ${paramIdx} OFFSET ${paramIdx + 1}`,
     [...params, parseInt(limit as string, 10), parseInt(offset as string, 10)]
   );
 
@@ -166,14 +167,14 @@ intelligenceRouter.get('/publishing', async (req: Request, res: Response) => {
     items: result.rows,
     total: parseInt(countResult.rows[0]?.count || '0', 10),
   });
-});
+}));
 
 // ─── GET /api/intelligence/config ────────────────────────────────────────────
 
 /**
  * Get job schedules and sources configuration.
  */
-intelligenceRouter.get('/config', async (req: Request, res: Response) => {
+intelligenceRouter.get('/config', asyncHandler(async (req: Request, res: Response) => {
   const userId = req.user!.userId;
 
   const result = await query<{ intelligence_schedules: Record<string, unknown> | null }>(
@@ -188,14 +189,14 @@ intelligenceRouter.get('/config', async (req: Request, res: Response) => {
   };
 
   res.json({ schedules });
-});
+}));
 
 // ─── PUT /api/intelligence/config ────────────────────────────────────────────
 
 /**
  * Update job schedules and sources configuration.
  */
-intelligenceRouter.put('/config', async (req: Request, res: Response) => {
+intelligenceRouter.put('/config', asyncHandler(async (req: Request, res: Response) => {
   const userId = req.user!.userId;
   const { schedules } = req.body;
 
@@ -223,4 +224,4 @@ intelligenceRouter.put('/config', async (req: Request, res: Response) => {
   );
 
   res.json({ schedules });
-});
+}));

@@ -6,6 +6,7 @@
 
 import { Router, Request, Response } from 'express';
 import { requireAuth } from '../middleware/auth.middleware.js';
+import { asyncHandler } from '../middleware/async-handler.js';
 import { AppError, ErrorCodes } from '../middleware/error-handler.middleware.js';
 import { query } from '../db/connection.js';
 import { getPendingNudges, acknowledgeNudge } from '../services/notification.service.js';
@@ -19,19 +20,19 @@ router.use(requireAuth);
  * GET /api/nudges
  * List pending (unacknowledged) nudges for the current user.
  */
-router.get('/', async (req: Request, res: Response) => {
+router.get('/', asyncHandler(async (req: Request, res: Response) => {
   const userId = req.user!.userId;
 
   const nudges = await getPendingNudges(userId);
 
   res.json({ nudges });
-});
+}));
 
 /**
  * PUT /api/nudges/:id/acknowledge
  * Mark a nudge as seen/acknowledged.
  */
-router.put('/:id/acknowledge', async (req: Request, res: Response) => {
+router.put('/:id/acknowledge', asyncHandler(async (req: Request, res: Response) => {
   const userId = req.user!.userId;
   const nudgeId = req.params.id as string;
 
@@ -42,14 +43,14 @@ router.put('/:id/acknowledge', async (req: Request, res: Response) => {
   }
 
   res.json({ acknowledged: true });
-});
+}));
 
 /**
  * POST /api/settings/vacation
  * Set a planned break period (vacation mode).
  * Body: { start_date: string, end_date: string } or { clear: true }
  */
-router.post('/vacation', async (req: Request, res: Response) => {
+router.post('/vacation', asyncHandler(async (req: Request, res: Response) => {
   const userId = req.user!.userId;
   const { start_date, end_date, clear } = req.body;
 
@@ -90,6 +91,6 @@ router.post('/vacation', async (req: Request, res: Response) => {
     vacation: { start_date: startDate, end_date: endDate },
     message: 'Vacation mode set',
   });
-});
+}));
 
 export const nudgesRouter = router;

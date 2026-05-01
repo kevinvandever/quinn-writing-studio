@@ -1,6 +1,7 @@
 import { Router, Request, Response } from 'express';
 import { query } from '../db/connection.js';
 import { requireAuth } from '../middleware/auth.middleware.js';
+import { asyncHandler } from '../middleware/async-handler.js';
 import { AppError, ErrorCodes } from '../middleware/error-handler.middleware.js';
 import { personaConfigSchema } from '../schemas/persona.schema.js';
 
@@ -13,7 +14,7 @@ router.use(requireAuth);
  * GET /api/personas
  * List all persona configurations for the authenticated user.
  */
-router.get('/', async (req: Request, res: Response) => {
+router.get('/', asyncHandler(async (req: Request, res: Response) => {
   const userId = req.user!.userId;
 
   const result = await query<{
@@ -32,13 +33,13 @@ router.get('/', async (req: Request, res: Response) => {
   );
 
   res.json({ personas: result.rows });
-});
+}));
 
 /**
  * GET /api/personas/:id
  * Get a specific persona configuration (verify ownership).
  */
-router.get('/:id', async (req: Request, res: Response) => {
+router.get('/:id', asyncHandler(async (req: Request, res: Response) => {
   const userId = req.user!.userId;
   const personaId = req.params.id;
 
@@ -61,13 +62,13 @@ router.get('/:id', async (req: Request, res: Response) => {
   }
 
   res.json({ persona: result.rows[0] });
-});
+}));
 
 /**
  * POST /api/personas
  * Create a new persona configuration.
  */
-router.post('/', async (req: Request, res: Response) => {
+router.post('/', asyncHandler(async (req: Request, res: Response) => {
   const userId = req.user!.userId;
   const config = personaConfigSchema.parse(req.body);
 
@@ -86,13 +87,13 @@ router.post('/', async (req: Request, res: Response) => {
   );
 
   res.status(201).json({ persona: result.rows[0] });
-});
+}));
 
 /**
  * PUT /api/personas/:id
  * Update an existing persona configuration (validate against schema).
  */
-router.put('/:id', async (req: Request, res: Response) => {
+router.put('/:id', asyncHandler(async (req: Request, res: Response) => {
   const userId = req.user!.userId;
   const personaId = req.params.id;
   const config = personaConfigSchema.parse(req.body);
@@ -117,13 +118,13 @@ router.put('/:id', async (req: Request, res: Response) => {
   }
 
   res.json({ persona: result.rows[0] });
-});
+}));
 
 /**
  * POST /api/personas/:id/validate
  * Validate a persona configuration against the schema without saving.
  */
-router.post('/:id/validate', async (req: Request, res: Response) => {
+router.post('/:id/validate', asyncHandler(async (req: Request, res: Response) => {
   const userId = req.user!.userId;
   const personaId = req.params.id;
 
@@ -150,6 +151,6 @@ router.post('/:id/validate', async (req: Request, res: Response) => {
   }
 
   res.json({ valid: true, errors: [] });
-});
+}));
 
 export const personasRouter = router;

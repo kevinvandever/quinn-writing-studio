@@ -2,6 +2,7 @@ import { Router, Request, Response } from 'express';
 import { z } from 'zod';
 import { query } from '../db/connection.js';
 import { requireAuth } from '../middleware/auth.middleware.js';
+import { asyncHandler } from '../middleware/async-handler.js';
 import { AppError, ErrorCodes } from '../middleware/error-handler.middleware.js';
 
 const router = Router();
@@ -24,7 +25,7 @@ const updateCaptureSchema = z.object({
  * POST /api/captures
  * Create a new quick capture. Status defaults to 'inbox'.
  */
-router.post('/', async (req: Request, res: Response) => {
+router.post('/', asyncHandler(async (req: Request, res: Response) => {
   const userId = req.user!.userId;
   const data = createCaptureSchema.parse(req.body);
 
@@ -52,7 +53,7 @@ router.post('/', async (req: Request, res: Response) => {
   );
 
   res.status(201).json({ capture });
-});
+}));
 
 /**
  * GET /api/captures
@@ -60,7 +61,7 @@ router.post('/', async (req: Request, res: Response) => {
  * Filterable by: project_id, status, from (date), to (date)
  * Supports pagination via: limit, offset
  */
-router.get('/', async (req: Request, res: Response) => {
+router.get('/', asyncHandler(async (req: Request, res: Response) => {
   const userId = req.user!.userId;
   const { project_id, status, from, to, limit, offset } = req.query;
 
@@ -69,25 +70,25 @@ router.get('/', async (req: Request, res: Response) => {
   let paramIndex = 2;
 
   if (project_id) {
-    conditions.push(`project_id = $${paramIndex}`);
+    conditions.push(`project_id = ${paramIndex}`);
     values.push(project_id);
     paramIndex++;
   }
 
   if (status) {
-    conditions.push(`status = $${paramIndex}`);
+    conditions.push(`status = ${paramIndex}`);
     values.push(status);
     paramIndex++;
   }
 
   if (from) {
-    conditions.push(`created_at >= $${paramIndex}`);
+    conditions.push(`created_at >= ${paramIndex}`);
     values.push(from);
     paramIndex++;
   }
 
   if (to) {
-    conditions.push(`created_at <= $${paramIndex}`);
+    conditions.push(`created_at <= ${paramIndex}`);
     values.push(to);
     paramIndex++;
   }
@@ -114,7 +115,7 @@ router.get('/', async (req: Request, res: Response) => {
      FROM quick_captures
      WHERE ${whereClause}
      ORDER BY created_at DESC
-     LIMIT $${paramIndex} OFFSET $${paramIndex + 1}`,
+     LIMIT ${paramIndex} OFFSET ${paramIndex + 1}`,
     [...values, limitVal, offsetVal]
   );
 
@@ -126,13 +127,13 @@ router.get('/', async (req: Request, res: Response) => {
     limit: limitVal,
     offset: offsetVal,
   });
-});
+}));
 
 /**
  * PUT /api/captures/:id
  * Update a capture (change project_id, status, content). Verifies ownership.
  */
-router.put('/:id', async (req: Request, res: Response) => {
+router.put('/:id', asyncHandler(async (req: Request, res: Response) => {
   const userId = req.user!.userId;
   const captureId = req.params.id;
   const data = updateCaptureSchema.parse(req.body);
@@ -143,19 +144,19 @@ router.put('/:id', async (req: Request, res: Response) => {
   let paramIndex = 1;
 
   if (data.content !== undefined) {
-    setClauses.push(`content = $${paramIndex}`);
+    setClauses.push(`content = ${paramIndex}`);
     values.push(data.content);
     paramIndex++;
   }
 
   if (data.project_id !== undefined) {
-    setClauses.push(`project_id = $${paramIndex}`);
+    setClauses.push(`project_id = ${paramIndex}`);
     values.push(data.project_id);
     paramIndex++;
   }
 
   if (data.status !== undefined) {
-    setClauses.push(`status = $${paramIndex}`);
+    setClauses.push(`status = ${paramIndex}`);
     values.push(data.status);
     paramIndex++;
   }
@@ -180,7 +181,7 @@ router.put('/:id', async (req: Request, res: Response) => {
   }>(
     `UPDATE quick_captures
      SET ${setClauses.join(', ')}
-     WHERE id = $${captureIdParam} AND user_id = $${userIdParam}
+     WHERE id = ${captureIdParam} AND user_id = ${userIdParam}
      RETURNING id, user_id, project_id, content, status, created_at`,
     values
   );
@@ -190,13 +191,13 @@ router.put('/:id', async (req: Request, res: Response) => {
   }
 
   res.json({ capture: result.rows[0] });
-});
+}));
 
 /**
  * DELETE /api/captures/:id
  * Delete a capture. Verifies ownership.
  */
-router.delete('/:id', async (req: Request, res: Response) => {
+router.delete('/:id', asyncHandler(async (req: Request, res: Response) => {
   const userId = req.user!.userId;
   const captureId = req.params.id;
 
@@ -210,6 +211,6 @@ router.delete('/:id', async (req: Request, res: Response) => {
   }
 
   res.status(204).send();
-});
+}));
 
 export const capturesRouter = router;

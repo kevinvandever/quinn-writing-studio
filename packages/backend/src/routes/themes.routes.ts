@@ -6,6 +6,7 @@
 
 import { Router, Request, Response } from 'express';
 import { requireAuth } from '../middleware/auth.middleware.js';
+import { asyncHandler } from '../middleware/async-handler.js';
 import { analyzeThemes, getThemeMap } from '../services/theme-analysis.service.js';
 
 const router = Router();
@@ -17,7 +18,7 @@ router.use(requireAuth);
  * POST /api/themes/analyze
  * Trigger cross-project theme analysis.
  */
-router.post('/analyze', async (req: Request, res: Response) => {
+router.post('/analyze', asyncHandler(async (req: Request, res: Response) => {
   const userId = req.user!.userId;
 
   const connections = await analyzeThemes(userId);
@@ -27,13 +28,13 @@ router.post('/analyze', async (req: Request, res: Response) => {
     count: connections.length,
     message: `Discovered ${connections.length} thematic connections`,
   });
-});
+}));
 
 /**
  * GET /api/themes
  * Get the theme map (all connections with document details).
  */
-router.get('/', async (req: Request, res: Response) => {
+router.get('/', asyncHandler(async (req: Request, res: Response) => {
   const userId = req.user!.userId;
 
   const connections = await getThemeMap(userId);
@@ -56,6 +57,6 @@ router.get('/', async (req: Request, res: Response) => {
       connections: conns,
     })),
   });
-});
+}));
 
 export const themesRouter = router;

@@ -1,6 +1,7 @@
 import { Router, Request, Response } from 'express';
 import { query } from '../db/connection.js';
 import { requireAuth } from '../middleware/auth.middleware.js';
+import { asyncHandler } from '../middleware/async-handler.js';
 import { AppError, ErrorCodes } from '../middleware/error-handler.middleware.js';
 import { startSession } from '../services/coaching.service.js';
 
@@ -15,7 +16,7 @@ promptlyRouter.use(requireAuth);
  * List content queue items for the Promptly workflow.
  * Returns items with their associated intelligence item details.
  */
-promptlyRouter.get('/queue', async (req: Request, res: Response) => {
+promptlyRouter.get('/queue', asyncHandler(async (req: Request, res: Response) => {
   const userId = req.user!.userId;
   const { status, projectId } = req.query;
 
@@ -24,13 +25,13 @@ promptlyRouter.get('/queue', async (req: Request, res: Response) => {
   let paramIdx = 2;
 
   if (status && typeof status === 'string') {
-    whereClause += ` AND pqi.status = $${paramIdx}`;
+    whereClause += ` AND pqi.status = ${paramIdx}`;
     params.push(status);
     paramIdx++;
   }
 
   if (projectId && typeof projectId === 'string') {
-    whereClause += ` AND pqi.project_id = $${paramIdx}`;
+    whereClause += ` AND pqi.project_id = ${paramIdx}`;
     params.push(projectId);
     paramIdx++;
   }
@@ -59,7 +60,7 @@ promptlyRouter.get('/queue', async (req: Request, res: Response) => {
   );
 
   res.json({ items: result.rows });
-});
+}));
 
 // ─── POST /api/promptly/queue/:newsId/select ─────────────────────────────────
 
@@ -67,7 +68,7 @@ promptlyRouter.get('/queue', async (req: Request, res: Response) => {
  * Move a news item from the intelligence feed to the Promptly content queue.
  * Creates a new queue item linked to the intelligence item.
  */
-promptlyRouter.post('/queue/:newsId/select', async (req: Request, res: Response) => {
+promptlyRouter.post('/queue/:newsId/select', asyncHandler(async (req: Request, res: Response) => {
   const userId = req.user!.userId;
   const { newsId } = req.params;
   const { projectId } = req.body;
@@ -129,14 +130,14 @@ promptlyRouter.post('/queue/:newsId/select', async (req: Request, res: Response)
   );
 
   res.status(201).json(result.rows[0]);
-});
+}));
 
 // ─── PUT /api/promptly/queue/:id ─────────────────────────────────────────────
 
 /**
  * Update a queue item's status or notes.
  */
-promptlyRouter.put('/queue/:id', async (req: Request, res: Response) => {
+promptlyRouter.put('/queue/:id', asyncHandler(async (req: Request, res: Response) => {
   const userId = req.user!.userId;
   const { id } = req.params;
   const { status, notes, substackPostId } = req.body;
@@ -163,7 +164,7 @@ promptlyRouter.put('/queue/:id', async (req: Request, res: Response) => {
     if (!validStatuses.includes(status)) {
       throw new AppError(400, ErrorCodes.VALIDATION_ERROR, 'Invalid status');
     }
-    updates.push(`status = $${paramIdx}`);
+    updates.push(`status = ${paramIdx}`);
     params.push(status);
     paramIdx++;
 
@@ -173,13 +174,13 @@ promptlyRouter.put('/queue/:id', async (req: Request, res: Response) => {
   }
 
   if (notes !== undefined) {
-    updates.push(`notes = $${paramIdx}`);
+    updates.push(`notes = ${paramIdx}`);
     params.push(notes);
     paramIdx++;
   }
 
   if (substackPostId !== undefined) {
-    updates.push(`substack_post_id = $${paramIdx}`);
+    updates.push(`substack_post_id = ${paramIdx}`);
     params.push(substackPostId);
     paramIdx++;
   }
@@ -192,13 +193,13 @@ promptlyRouter.put('/queue/:id', async (req: Request, res: Response) => {
   const result = await query(
     `UPDATE promptly_queue_items
      SET ${updates.join(', ')}
-     WHERE id = $${paramIdx}
+     WHERE id = ${paramIdx}
      RETURNING id, project_id, intelligence_item_id, status, substack_post_id, coaching_session_id, notes, selected_at, published_at`,
     params
   );
 
   res.json(result.rows[0]);
-});
+}));
 
 // ─── POST /api/promptly/queue/:id/coach ──────────────────────────────────────
 
@@ -206,7 +207,7 @@ promptlyRouter.put('/queue/:id', async (req: Request, res: Response) => {
  * Start a Promptly coaching session for a queue item.
  * Creates a new coaching session with type 'promptly_coaching' and links it to the queue item.
  */
-promptlyRouter.post('/queue/:id/coach', async (req: Request, res: Response) => {
+promptlyRouter.post('/queue/:id/coach', asyncHandler(async (req: Request, res: Response) => {
   const userId = req.user!.userId;
   const { id } = req.params;
 
@@ -247,4 +248,4 @@ promptlyRouter.post('/queue/:id/coach', async (req: Request, res: Response) => {
     queueItemId: id,
     intelligenceItemId: queueItem.intelligence_item_id,
   });
-});
+}));

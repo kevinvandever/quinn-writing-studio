@@ -5,6 +5,7 @@ import { z } from 'zod';
 import { config } from '../config.js';
 import { query } from '../db/connection.js';
 import { AppError, ErrorCodes } from '../middleware/error-handler.middleware.js';
+import { asyncHandler } from '../middleware/async-handler.js';
 
 const router = Router();
 
@@ -42,7 +43,7 @@ function getCookieOptions() {
  * POST /api/auth/login
  * Validate email/password with bcrypt, issue JWT in HTTP-only secure cookie.
  */
-router.post('/login', async (req: Request, res: Response) => {
+router.post('/login', asyncHandler(async (req: Request, res: Response) => {
   const { email, password } = loginSchema.parse(req.body);
 
   const result = await query<{
@@ -81,13 +82,13 @@ router.post('/login', async (req: Request, res: Response) => {
       displayName: user.display_name,
     },
   });
-});
+}));
 
 /**
  * POST /api/auth/register
  * Create a new user account with email/password.
  */
-router.post('/register', async (req: Request, res: Response) => {
+router.post('/register', asyncHandler(async (req: Request, res: Response) => {
   const { email, password, displayName } = registerSchema.parse(req.body);
 
   // Check if user already exists
@@ -129,7 +130,7 @@ router.post('/register', async (req: Request, res: Response) => {
       displayName: user.display_name,
     },
   });
-});
+}));
 
 /**
  * POST /api/auth/logout
@@ -150,7 +151,7 @@ router.post('/logout', (_req: Request, res: Response) => {
  * GET /api/auth/session
  * Validate current JWT from cookie, return user info if valid.
  */
-router.get('/session', async (req: Request, res: Response) => {
+router.get('/session', asyncHandler(async (req: Request, res: Response) => {
   const token = req.cookies?.[COOKIE_NAME] as string | undefined;
 
   if (!token) {
@@ -185,6 +186,6 @@ router.get('/session', async (req: Request, res: Response) => {
       displayName: user.display_name,
     },
   });
-});
+}));
 
 export const authRouter = router;

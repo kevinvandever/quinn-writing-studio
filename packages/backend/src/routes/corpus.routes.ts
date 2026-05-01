@@ -8,6 +8,7 @@ import { Router, Request, Response } from 'express';
 import multer from 'multer';
 import { query, getClient } from '../db/connection.js';
 import { requireAuth } from '../middleware/auth.middleware.js';
+import { asyncHandler } from '../middleware/async-handler.js';
 import { AppError, ErrorCodes } from '../middleware/error-handler.middleware.js';
 import {
   parseScrivenerZip,
@@ -47,7 +48,7 @@ router.use(requireAuth);
 router.post(
   '/projects/:id/corpus/upload',
   upload.single('file'),
-  async (req: Request, res: Response) => {
+  asyncHandler(async (req: Request, res: Response) => {
     const userId = req.user!.userId;
     const projectId = req.params.id;
 
@@ -175,14 +176,14 @@ router.post(
     } finally {
       client.release();
     }
-  }
+  })
 );
 
 /**
  * GET /api/projects/:id/corpus
  * Get the corpus tree structure for a project.
  */
-router.get('/projects/:id/corpus', async (req: Request, res: Response) => {
+router.get('/projects/:id/corpus', asyncHandler(async (req: Request, res: Response) => {
   const userId = req.user!.userId;
   const projectId = req.params.id;
 
@@ -221,13 +222,13 @@ router.get('/projects/:id/corpus', async (req: Request, res: Response) => {
   const tree = buildTree(docsResult.rows);
 
   res.json({ documents: tree });
-});
+}));
 
 /**
  * GET /api/corpus/documents/:id
  * Get a single document's content.
  */
-router.get('/corpus/documents/:id', async (req: Request, res: Response) => {
+router.get('/corpus/documents/:id', asyncHandler(async (req: Request, res: Response) => {
   const userId = req.user!.userId;
   const documentId = req.params.id;
 
@@ -259,13 +260,13 @@ router.get('/corpus/documents/:id', async (req: Request, res: Response) => {
   }
 
   res.json({ document: result.rows[0] });
-});
+}));
 
 /**
  * GET /api/projects/:id/corpus/imports
  * List import history for a project.
  */
-router.get('/projects/:id/corpus/imports', async (req: Request, res: Response) => {
+router.get('/projects/:id/corpus/imports', asyncHandler(async (req: Request, res: Response) => {
   const userId = req.user!.userId;
   const projectId = req.params.id;
 
@@ -296,14 +297,14 @@ router.get('/projects/:id/corpus/imports', async (req: Request, res: Response) =
   );
 
   res.json({ imports: result.rows });
-});
+}));
 
 /**
  * POST /api/projects/:id/drafts/upload
  * Manual paste/upload fallback for adding content to corpus.
  * Accepts { title, content } in body and stores as corpus_document with source_type='manual_upload'.
  */
-router.post('/projects/:id/drafts/upload', async (req: Request, res: Response) => {
+router.post('/projects/:id/drafts/upload', asyncHandler(async (req: Request, res: Response) => {
   const userId = req.user!.userId;
   const projectId = req.params.id;
   const { title, content } = req.body;
@@ -347,13 +348,13 @@ router.post('/projects/:id/drafts/upload', async (req: Request, res: Response) =
   });
 
   res.status(201).json({ document: result.rows[0] });
-});
+}));
 
 /**
  * GET /api/projects/:id/corpus/diff
  * Get the change summary for the latest import.
  */
-router.get('/projects/:id/corpus/diff', async (req: Request, res: Response) => {
+router.get('/projects/:id/corpus/diff', asyncHandler(async (req: Request, res: Response) => {
   const userId = req.user!.userId;
   const projectId = req.params.id;
 
@@ -392,7 +393,7 @@ router.get('/projects/:id/corpus/diff', async (req: Request, res: Response) => {
     diff: result.rows[0]!.diff_summary,
     importedAt: result.rows[0]!.imported_at,
   });
-});
+}));
 
 /**
  * Recursively insert parsed documents into the database.

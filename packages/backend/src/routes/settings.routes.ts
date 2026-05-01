@@ -7,6 +7,7 @@
 
 import { Router, Request, Response } from 'express';
 import { requireAuth } from '../middleware/auth.middleware.js';
+import { asyncHandler } from '../middleware/async-handler.js';
 import { AppError, ErrorCodes } from '../middleware/error-handler.middleware.js';
 import { query } from '../db/connection.js';
 import { encrypt, decrypt } from '../utils/encryption.js';
@@ -21,7 +22,7 @@ router.use(requireAuth);
  * Get all settings for the current user.
  * API key is returned masked (only last 4 chars visible).
  */
-router.get('/', async (req: Request, res: Response) => {
+router.get('/', asyncHandler(async (req: Request, res: Response) => {
   const userId = req.user!.userId;
 
   const result = await query<{
@@ -87,14 +88,14 @@ router.get('/', async (req: Request, res: Response) => {
       intelligence_schedules: settings.intelligence_schedules,
     },
   });
-});
+}));
 
 /**
  * PUT /api/settings
  * Update settings for the current user.
  * API key is encrypted before storage.
  */
-router.put('/', async (req: Request, res: Response) => {
+router.put('/', asyncHandler(async (req: Request, res: Response) => {
   const userId = req.user!.userId;
   const {
     anthropic_api_key,
@@ -125,31 +126,31 @@ router.put('/', async (req: Request, res: Response) => {
 
   if (anthropic_api_key !== undefined) {
     const encrypted = anthropic_api_key ? encrypt(anthropic_api_key) : null;
-    updates.push(`anthropic_api_key = $${paramIndex++}`);
+    updates.push(`anthropic_api_key = ${paramIndex++}`);
     values.push(encrypted);
   }
   if (model_routing_preference !== undefined) {
-    updates.push(`model_routing_preference = $${paramIndex++}`);
+    updates.push(`model_routing_preference = ${paramIndex++}`);
     values.push(model_routing_preference);
   }
   if (quiet_period_thresholds !== undefined) {
-    updates.push(`quiet_period_thresholds = $${paramIndex++}`);
+    updates.push(`quiet_period_thresholds = ${paramIndex++}`);
     values.push(JSON.stringify(quiet_period_thresholds));
   }
   if (stale_corpus_threshold_days !== undefined) {
-    updates.push(`stale_corpus_threshold_days = $${paramIndex++}`);
+    updates.push(`stale_corpus_threshold_days = ${paramIndex++}`);
     values.push(stale_corpus_threshold_days);
   }
   if (email_notifications_enabled !== undefined) {
-    updates.push(`email_notifications_enabled = $${paramIndex++}`);
+    updates.push(`email_notifications_enabled = ${paramIndex++}`);
     values.push(email_notifications_enabled);
   }
   if (notification_email !== undefined) {
-    updates.push(`notification_email = $${paramIndex++}`);
+    updates.push(`notification_email = ${paramIndex++}`);
     values.push(notification_email);
   }
   if (intelligence_schedules !== undefined) {
-    updates.push(`intelligence_schedules = $${paramIndex++}`);
+    updates.push(`intelligence_schedules = ${paramIndex++}`);
     values.push(JSON.stringify(intelligence_schedules));
   }
 
@@ -165,6 +166,6 @@ router.put('/', async (req: Request, res: Response) => {
   );
 
   res.json({ message: 'Settings updated successfully' });
-});
+}));
 
 export const settingsRouter = router;

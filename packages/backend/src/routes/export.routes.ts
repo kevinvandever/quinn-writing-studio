@@ -6,6 +6,7 @@
 
 import { Router, Request, Response } from 'express';
 import { requireAuth } from '../middleware/auth.middleware.js';
+import { asyncHandler } from '../middleware/async-handler.js';
 import { AppError, ErrorCodes } from '../middleware/error-handler.middleware.js';
 import { generateExport, getExportStatus, getExportBuffer } from '../services/export.service.js';
 
@@ -22,7 +23,7 @@ const exportJobs = new Map<string, { userId: string; status: string; projectId?:
  * Initiate a full or per-project export.
  * Body: { project_id?: string } — if omitted, exports all data.
  */
-router.post('/', async (req: Request, res: Response) => {
+router.post('/', asyncHandler(async (req: Request, res: Response) => {
   const userId = req.user!.userId;
   const { project_id } = req.body;
 
@@ -49,13 +50,13 @@ router.post('/', async (req: Request, res: Response) => {
     status: 'processing',
     message: 'Export initiated. Check status at /api/export/:jobId/status',
   });
-});
+}));
 
 /**
  * GET /api/export/:jobId/status
  * Check export progress.
  */
-router.get('/:jobId/status', async (req: Request, res: Response) => {
+router.get('/:jobId/status', asyncHandler(async (req: Request, res: Response) => {
   const userId = req.user!.userId;
   const jobId = req.params.jobId as string;
 
@@ -74,13 +75,13 @@ router.get('/:jobId/status', async (req: Request, res: Response) => {
     ready: job.status === 'completed' && serviceStatus === 'ready',
     downloadUrl: job.status === 'completed' ? `/api/export/${jobId}/download` : null,
   });
-});
+}));
 
 /**
  * GET /api/export/:jobId/download
  * Download the export archive.
  */
-router.get('/:jobId/download', async (req: Request, res: Response) => {
+router.get('/:jobId/download', asyncHandler(async (req: Request, res: Response) => {
   const userId = req.user!.userId;
   const jobId = req.params.jobId as string;
 
@@ -109,6 +110,6 @@ router.get('/:jobId/download', async (req: Request, res: Response) => {
 
   // Clean up after download
   exportJobs.delete(jobId);
-});
+}));
 
 export const exportRouter = router;

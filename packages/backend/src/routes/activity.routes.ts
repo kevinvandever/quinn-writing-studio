@@ -6,6 +6,7 @@
 
 import { Router, Request, Response } from 'express';
 import { requireAuth } from '../middleware/auth.middleware.js';
+import { asyncHandler } from '../middleware/async-handler.js';
 import { AppError, ErrorCodes } from '../middleware/error-handler.middleware.js';
 import {
   getActivityInsights,
@@ -23,7 +24,7 @@ router.use(requireAuth);
  * Get activity insights for a configurable time period.
  * Query params: period (week | month | quarter, defaults to week)
  */
-router.get('/', async (req: Request, res: Response) => {
+router.get('/', asyncHandler(async (req: Request, res: Response) => {
   const userId = req.user!.userId;
   const period = (req.query.period as string) || 'week';
 
@@ -40,18 +41,18 @@ router.get('/', async (req: Request, res: Response) => {
   const insights = await getActivityInsights(userId, period as TimePeriod);
 
   res.json({ insights });
-});
+}));
 
 /**
  * GET /api/activity/streaks
  * Get publishing streaks per project.
  */
-router.get('/streaks', async (req: Request, res: Response) => {
+router.get('/streaks', asyncHandler(async (req: Request, res: Response) => {
   const userId = req.user!.userId;
 
   const streaks = await getPublishingStreaks(userId);
 
   res.json({ streaks });
-});
+}));
 
 export const activityRouter = router;

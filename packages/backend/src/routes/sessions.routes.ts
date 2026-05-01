@@ -2,6 +2,7 @@ import { Router, Request, Response } from 'express';
 import { z } from 'zod';
 import { query } from '../db/connection.js';
 import { requireAuth } from '../middleware/auth.middleware.js';
+import { asyncHandler } from '../middleware/async-handler.js';
 import { claudeApiLimiter } from '../middleware/rate-limit.middleware.js';
 import { AppError, ErrorCodes } from '../middleware/error-handler.middleware.js';
 import {
@@ -32,7 +33,7 @@ const sendMessageSchema = z.object({
 router.post(
   '/projects/:id/sessions',
   requireAuth,
-  async (req: Request, res: Response) => {
+  asyncHandler(async (req: Request, res: Response) => {
     const userId = req.user!.userId;
     const projectId = req.params.id as string;
     const data = startSessionSchema.parse(req.body);
@@ -44,7 +45,7 @@ router.post(
     );
 
     res.status(201).json({ session: sessionContext });
-  }
+  })
 );
 
 /**
@@ -54,7 +55,7 @@ router.post(
 router.get(
   '/projects/:id/sessions',
   requireAuth,
-  async (req: Request, res: Response) => {
+  asyncHandler(async (req: Request, res: Response) => {
     const userId = req.user!.userId;
     const projectId = req.params.id as string;
     const page = Math.max(1, parseInt(req.query.page as string) || 1);
@@ -106,7 +107,7 @@ router.get(
         totalPages: Math.ceil(total / limit),
       },
     });
-  }
+  })
 );
 
 /**
@@ -116,7 +117,7 @@ router.get(
 router.get(
   '/sessions/:id',
   requireAuth,
-  async (req: Request, res: Response) => {
+  asyncHandler(async (req: Request, res: Response) => {
     const userId = req.user!.userId;
     const sessionId = req.params.id as string;
 
@@ -165,7 +166,7 @@ router.get(
       session,
       messages: messagesResult.rows,
     });
-  }
+  })
 );
 
 /**
@@ -176,7 +177,7 @@ router.post(
   '/sessions/:id/messages',
   requireAuth,
   claudeApiLimiter,
-  async (req: Request, res: Response) => {
+  asyncHandler(async (req: Request, res: Response) => {
     const userId = req.user!.userId;
     const sessionId = req.params.id as string;
     const data = sendMessageSchema.parse(req.body);
@@ -194,7 +195,7 @@ router.post(
     }
 
     await sendSessionMessage(userId, sessionId, data.content, res);
-  }
+  })
 );
 
 /**
@@ -204,7 +205,7 @@ router.post(
 router.post(
   '/sessions/:id/end',
   requireAuth,
-  async (req: Request, res: Response) => {
+  asyncHandler(async (req: Request, res: Response) => {
     const userId = req.user!.userId;
     const sessionId = req.params.id as string;
 
@@ -226,7 +227,7 @@ router.post(
       summary: result.summary,
       next_steps: result.nextSteps,
     });
-  }
+  })
 );
 
 export const sessionsRouter = router;

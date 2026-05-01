@@ -7,6 +7,7 @@
 import { Router, Request, Response } from 'express';
 import { query } from '../db/connection.js';
 import { requireAuth } from '../middleware/auth.middleware.js';
+import { asyncHandler } from '../middleware/async-handler.js';
 import { AppError, ErrorCodes } from '../middleware/error-handler.middleware.js';
 
 const router = Router();
@@ -18,7 +19,7 @@ router.use(requireAuth);
  * POST /api/documents/:id/snapshots
  * Create a manual snapshot of a document.
  */
-router.post('/documents/:id/snapshots', async (req: Request, res: Response) => {
+router.post('/documents/:id/snapshots', asyncHandler(async (req: Request, res: Response) => {
   const userId = req.user!.userId;
   const documentId = req.params.id;
 
@@ -57,13 +58,13 @@ router.post('/documents/:id/snapshots', async (req: Request, res: Response) => {
   );
 
   res.status(201).json({ snapshot: snapshotResult.rows[0] });
-});
+}));
 
 /**
  * GET /api/documents/:id/snapshots
  * List all snapshots for a document.
  */
-router.get('/documents/:id/snapshots', async (req: Request, res: Response) => {
+router.get('/documents/:id/snapshots', asyncHandler(async (req: Request, res: Response) => {
   const userId = req.user!.userId;
   const documentId = req.params.id;
 
@@ -95,13 +96,13 @@ router.get('/documents/:id/snapshots', async (req: Request, res: Response) => {
   );
 
   res.json({ snapshots: snapshots.rows });
-});
+}));
 
 /**
  * GET /api/snapshots/:id
  * Get a single snapshot's content.
  */
-router.get('/snapshots/:id', async (req: Request, res: Response) => {
+router.get('/snapshots/:id', asyncHandler(async (req: Request, res: Response) => {
   const userId = req.user!.userId;
   const snapshotId = req.params.id;
 
@@ -126,13 +127,13 @@ router.get('/snapshots/:id', async (req: Request, res: Response) => {
   }
 
   res.json({ snapshot: result.rows[0] });
-});
+}));
 
 /**
  * GET /api/documents/:id/snapshots/diff
  * Compare two snapshots. Accepts `a` and `b` query params for snapshot IDs.
  */
-router.get('/documents/:id/snapshots/diff', async (req: Request, res: Response) => {
+router.get('/documents/:id/snapshots/diff', asyncHandler(async (req: Request, res: Response) => {
   const userId = req.user!.userId;
   const documentId = req.params.id;
   const snapshotAId = req.query.a as string;
@@ -199,13 +200,13 @@ router.get('/documents/:id/snapshots/diff', async (req: Request, res: Response) 
       wordCountDelta,
     },
   });
-});
+}));
 
 /**
  * DELETE /api/snapshots/:id
  * Delete a snapshot.
  */
-router.delete('/snapshots/:id', async (req: Request, res: Response) => {
+router.delete('/snapshots/:id', asyncHandler(async (req: Request, res: Response) => {
   const userId = req.user!.userId;
   const snapshotId = req.params.id;
 
@@ -226,6 +227,6 @@ router.delete('/snapshots/:id', async (req: Request, res: Response) => {
   await query('DELETE FROM draft_snapshots WHERE id = $1', [snapshotId]);
 
   res.status(204).send();
-});
+}));
 
 export const snapshotsRouter = router;

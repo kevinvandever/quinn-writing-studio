@@ -16,6 +16,12 @@ const loginSchema = z.object({
   password: z.string().min(1, 'Password is required'),
 });
 
+const registerSchema = z.object({
+  email: z.string().email('Invalid email address'),
+  password: z.string().min(8, 'Password must be at least 8 characters'),
+  displayName: z.string().min(1, 'Display name is required').max(100),
+});
+
 interface JwtPayload {
   userId: string;
   email: string;
@@ -69,6 +75,54 @@ router.post('/login', async (req: Request, res: Response) => {
   res.cookie(COOKIE_NAME, token, getCookieOptions());
 
   res.json({
+    user: {
+      id: user.id,
+      email: user.email,
+      displayName: user.display_name,
+    },
+  });
+});
+
+/**
+ * POST /api/auth/register
+ * Create a new user account with email/password.
+ */
+router.post('/register', async (req: Request, res: Response) => {
+  const { email, password, displayName } = registerSchema.parse(req.body);
+
+  // Check if user already exists
+  const existing = await query<{ id: string }>(
+    'SELECT id FROM users WHERE email = $1',
+    [email]
+  );
+
+  if (existing.rows.length > 0) {
+    throw new AppError(409, ErrorCodes.CONFLICT, 'An account with this email already exists');
+  }
+
+  // Hash password
+  const passwordHash = await bcrypt.hash(password, 10);
+
+  // Create user
+  const result = await query<{ id: string; email: string; display_name: string }>(
+    `INSERT INTO users (email, password_hash, display_name)
+     VALUES ($1, $2, $3)
+     RETURNING id, email, display_name`,
+    [email, passwordHash, displayName]
+  );
+
+  const user = result.rows[0];
+  if (!user) {
+    throw new AppError(500, ErrorCodes.INTERNAL_ERROR, 'Failed to create user');
+  }
+
+  // Issue JWT
+  const payload: JwtPayload = { userId: user.id, email: user.email };
+  const token = jwt.sign(payload, config.JWT_SECRET, { expiresIn: JWT_EXPIRY });
+
+  res.cookie(COOKIE_NAME, token, getCookieOptions());
+
+  res.status(201).json({
     user: {
       id: user.id,
       email: user.email,

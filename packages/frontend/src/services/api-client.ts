@@ -1,5 +1,8 @@
 const BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:3001';
 
+// Log the API URL on startup for debugging
+console.log('[API Client] Base URL:', BASE_URL);
+
 export class ApiError extends Error {
   constructor(
     public status: number,
@@ -47,12 +50,19 @@ async function request<T>(
     headers['Content-Type'] = 'application/json';
   }
 
-  const response = await fetch(`${BASE_URL}${path}`, {
-    method,
-    headers,
-    credentials: 'include',
-    body: body !== undefined ? JSON.stringify(body) : undefined,
-  });
+  let response: Response;
+  try {
+    response = await fetch(`${BASE_URL}${path}`, {
+      method,
+      headers,
+      credentials: 'include',
+      body: body !== undefined ? JSON.stringify(body) : undefined,
+    });
+  } catch (err) {
+    // Network error, CORS block, or server unreachable
+    const message = err instanceof Error ? err.message : 'Network request failed';
+    throw new ApiError(0, 'NETWORK_ERROR', `Unable to reach the server: ${message}`);
+  }
 
   if (response.status === 401) {
     handle401();

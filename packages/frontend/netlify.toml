@@ -8,10 +8,6 @@
   to = "/index.html"
   status = 200
 
-# Environment variables (set in Netlify dashboard)
-[build.environment]
-  VITE_API_URL = "https://quinn-api.railway.app"
-
 # Headers for security and caching
 [[headers]]
   for = "/*"

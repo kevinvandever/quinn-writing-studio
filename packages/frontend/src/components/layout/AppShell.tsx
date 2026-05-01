@@ -2,6 +2,8 @@ import { useState } from 'react';
 import { Outlet, NavLink } from 'react-router-dom';
 import { ProjectSwitcher } from './ProjectSwitcher';
 import { NotificationCenter } from '../notifications/NotificationCenter';
+import { useProjectStore } from '../../stores/projectStore';
+import { useAuthStore } from '../../stores/authStore';
 
 const navItems = [
   { to: '/', label: 'Dashboard', icon: '📊' },
@@ -30,6 +32,8 @@ const mobileBottomNav = [
 
 export function AppShell() {
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const { activeProject } = useProjectStore();
+  const { logout, user } = useAuthStore();
 
   return (
     <div className="min-h-screen flex bg-gray-50">
@@ -73,22 +77,28 @@ export function AppShell() {
               <p className="px-3 text-xs font-medium text-gray-400 uppercase tracking-wider mb-2">
                 Project
               </p>
-              {projectNavItems.map((item) => (
-                <NavLink
-                  key={item.to}
-                  to={item.to}
-                  className={({ isActive }) =>
-                    `flex items-center gap-3 px-3 py-2 rounded-md text-sm font-medium transition-colors ${
-                      isActive
-                        ? 'bg-indigo-50 text-indigo-700'
-                        : 'text-gray-700 hover:bg-gray-100'
-                    }`
-                  }
-                >
-                  <span>{item.icon}</span>
-                  <span>{item.label}</span>
-                </NavLink>
-              ))}
+              {activeProject ? (
+                projectNavItems.map((item) => (
+                  <NavLink
+                    key={item.to}
+                    to={`/projects/${activeProject.id}/${item.to}`}
+                    className={({ isActive }) =>
+                      `flex items-center gap-3 px-3 py-2 rounded-md text-sm font-medium transition-colors ${
+                        isActive
+                          ? 'bg-indigo-50 text-indigo-700'
+                          : 'text-gray-700 hover:bg-gray-100'
+                      }`
+                    }
+                  >
+                    <span>{item.icon}</span>
+                    <span>{item.label}</span>
+                  </NavLink>
+                ))
+              ) : (
+                <p className="px-3 py-2 text-sm text-gray-400">
+                  Select a project above
+                </p>
+              )}
             </div>
 
             {/* Global nav */}
@@ -115,6 +125,19 @@ export function AppShell() {
               ))}
             </div>
           </nav>
+
+          {/* User / Logout */}
+          <div className="px-3 py-3 border-t border-gray-200">
+            <div className="flex items-center justify-between px-3">
+              <span className="text-sm text-gray-600 truncate">{user?.displayName || user?.email}</span>
+              <button
+                onClick={() => logout()}
+                className="text-sm text-gray-500 hover:text-gray-700"
+              >
+                Sign out
+              </button>
+            </div>
+          </div>
         </div>
       </aside>
 

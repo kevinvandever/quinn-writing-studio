@@ -4,26 +4,48 @@ import Redis from 'ioredis';
 import { config } from '../config.js';
 
 /**
- * Creates a Redis store for rate limiting, with fallback to in-memory store
- * if Redis is unavailable.
+ * Shared Redis client for all rate-limit stores.
+ * Created once, reused across limiters.
+ * null if Redis is unavailable (falls back to in-memory).
+ */
+let redisClient: Redis | null = null;
+
+function getRedisClient(): Redis | null {
+  if (redisClient) return redisClient;
+
+  try {
+    redisClient = new Redis(config.REDIS_URL, {
+      maxRetriesPerRequest: 3,
+      retryStrategy(times) {
+        if (times > 5) return null; // stop retrying after 5 attempts
+        return Math.min(times * 200, 2000);
+      },
+    });
+
+    redisClient.on('ready', () => {
+      console.log('[RateLimit] Redis connected');
+    });
+
+    redisClient.on('error', (err) => {
+      console.warn('[RateLimit] Redis error:', err.message);
+    });
+
+    return redisClient;
+  } catch {
+    console.warn('[RateLimit] Failed to create Redis client, using memory store');
+    return null;
+  }
+}
+
+/**
+ * Creates a Redis store for rate limiting.
+ * Returns undefined if Redis is unavailable (express-rate-limit falls back to memory).
  */
 function createRedisStore(prefix: string): RedisStore | undefined {
+  const client = getRedisClient();
+  if (!client) return undefined;
+
   try {
-    const client = new Redis(config.REDIS_URL, {
-      enableOfflineQueue: false,
-      maxRetriesPerRequest: 1,
-      lazyConnect: true,
-    });
-
-    client.on('error', (err) => {
-      console.warn(`[RateLimit] Redis error for ${prefix}:`, err.message);
-    });
-
-    // Attempt connection (non-blocking)
-    client.connect().catch(() => {
-      console.warn(`[RateLimit] Redis unavailable for ${prefix}, falling back to memory store`);
-    });
-
     return new RedisStore({
       // @ts-expect-error - ioredis is compatible with rate-limit-redis sendCommand
       sendCommand: (...args: string[]) => client.call(...args),

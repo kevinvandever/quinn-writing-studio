@@ -1,0 +1,16 @@
+{
+  "name": "quinn-writing-studio",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Quinn Writing Studio - AI-powered writing coach platform",
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "frontend": "npm run --workspace=packages/frontend",
+    "backend": "npm run --workspace=packages/backend"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

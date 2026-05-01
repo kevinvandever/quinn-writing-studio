@@ -1,0 +1,61 @@
+{
+  "name": "@quinn/backend",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Quinn Writing Studio - Backend API",
+  "main": "dist/server.js",
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsx watch src/server.ts",
+    "start": "node dist/server.js",
+    "typecheck": "tsc --noEmit",
+    "migrate": "node-pg-migrate",
+    "migrate:up": "node-pg-migrate up --migrations-dir src/db/migrations --envPath .env",
+    "seed": "tsx src/db/seed.ts"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.92.0",
+    "adm-zip": "^0.5.17",
+    "archiver": "^7.0.1",
+    "bcrypt": "^6.0.0",
+    "bull": "^4.16.5",
+    "cookie-parser": "^1.4.7",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "express-rate-limit": "^8.4.1",
+    "fast-xml-parser": "^5.7.2",
+    "helmet": "^8.0.0",
+    "ioredis": "^5.10.1",
+    "jsonwebtoken": "^9.0.3",
+    "multer": "^2.1.1",
+    "node-cron": "^4.2.1",
+    "node-pg-migrate": "^8.0.4",
+    "pg": "^8.20.0",
+    "rate-limit-redis": "^4.3.1",
+    "rss-parser": "^3.13.0",
+    "uuid": "^11.1.0",
+    "zod": "^3.24.2"
+  },
+  "devDependencies": {
+    "@types/adm-zip": "^0.5.8",
+    "@types/archiver": "^7.0.0",
+    "@types/bcrypt": "^6.0.0",
+    "@types/bull": "^3.15.9",
+    "@types/cookie-parser": "^1.4.10",
+    "@types/cors": "^2.8.17",
+    "@types/express": "^5.0.0",
+    "@types/express-rate-limit": "^5.1.3",
+    "@types/jsonwebtoken": "^9.0.10",
+    "@types/multer": "^2.1.0",
+    "@types/node": "^22.12.0",
+    "@types/node-cron": "^3.0.11",
+    "@types/pg": "^8.20.0",
+    "@types/uuid": "^10.0.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.3"
+  }
+}

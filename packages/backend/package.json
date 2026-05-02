@@ -11,7 +11,8 @@
     "typecheck": "tsc --noEmit",
     "migrate": "node-pg-migrate",
     "migrate:up": "NODE_OPTIONS='--import tsx/esm' node-pg-migrate up --migrations-dir src/db/migrations --envPath .env",
-    "seed": "tsx src/db/seed.ts"
+    "seed": "tsx src/db/seed.ts",
+    "seed:kevin": "tsx src/db/seed-kevin.ts"
   },
   "engines": {
     "node": ">=18.0.0"

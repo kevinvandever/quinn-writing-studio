@@ -33,7 +33,7 @@ function getCookieOptions() {
   return {
     httpOnly: true,
     secure: isProduction,
-    sameSite: 'none' as const,
+    sameSite: isProduction ? 'none' as const : 'lax' as const,
     maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days in ms
     path: '/',
   };

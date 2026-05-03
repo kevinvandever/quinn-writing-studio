@@ -32,3 +32,6 @@ coverage/
 .kiro/config.json
 .kiro/profile_arn
 .kiro/specs/
+
+# Claude Code
+.claude/

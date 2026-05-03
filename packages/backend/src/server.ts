@@ -5,6 +5,7 @@ import cookieParser from 'cookie-parser';
 
 // Import config - may throw if env vars are missing, but we handle gracefully
 import { config } from './config.js';
+import { query } from './db/connection.js';
 import { notFoundHandler, errorHandler } from './middleware/error-handler.middleware.js';
 import { authRouter } from './routes/auth.routes.js';
 import { projectsRouter } from './routes/projects.routes.js';
@@ -25,6 +26,9 @@ import { exportRouter } from './routes/export.routes.js';
 import { startScheduler } from './jobs/job-scheduler.js';
 
 const app = express();
+
+// Trust Railway's reverse proxy for correct IP detection (rate limiting, logging)
+app.set('trust proxy', 1);
 
 // Security headers — configure helmet to allow SSE streaming
 app.use(
@@ -59,12 +63,20 @@ app.get('/api/health', (_req, res) => {
   });
 });
 
-// Health check - readiness (will check DB + Redis later)
-app.get('/api/health/ready', (_req, res) => {
-  res.json({
-    status: 'ok',
-    timestamp: new Date().toISOString(),
-  });
+// Health check - readiness (verifies DB connectivity)
+app.get('/api/health/ready', async (_req, res) => {
+  try {
+    await query('SELECT 1');
+    res.json({
+      status: 'ok',
+      timestamp: new Date().toISOString(),
+    });
+  } catch {
+    res.status(503).json({
+      status: 'unhealthy',
+      timestamp: new Date().toISOString(),
+    });
+  }
 });
 
 // API routes

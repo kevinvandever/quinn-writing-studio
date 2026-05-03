@@ -121,22 +121,22 @@ router.put('/:id', asyncHandler(async (req: Request, res: Response) => {
   let paramIndex = 1;
 
   if (data.name !== undefined) {
-    setClauses.push(`name = ${paramIndex}`);
+    setClauses.push(`name = $${paramIndex}`);
     values.push(data.name);
     paramIndex++;
   }
   if (data.description !== undefined) {
-    setClauses.push(`description = ${paramIndex}`);
+    setClauses.push(`description = $${paramIndex}`);
     values.push(data.description);
     paramIndex++;
   }
   if (data.central_question !== undefined) {
-    setClauses.push(`central_question = ${paramIndex}`);
+    setClauses.push(`central_question = $${paramIndex}`);
     values.push(data.central_question);
     paramIndex++;
   }
   if (data.project_type !== undefined) {
-    setClauses.push(`project_type = ${paramIndex}`);
+    setClauses.push(`project_type = $${paramIndex}`);
     values.push(data.project_type);
     paramIndex++;
   }
@@ -159,7 +159,7 @@ router.put('/:id', asyncHandler(async (req: Request, res: Response) => {
   }>(
     `UPDATE projects
      SET ${setClauses.join(', ')}
-     WHERE id = ${projectIdParam} AND user_id = ${userIdParam} AND archived_at IS NULL
+     WHERE id = $${projectIdParam} AND user_id = $${userIdParam} AND archived_at IS NULL
      RETURNING id, name, description, central_question, project_type, created_at, updated_at`,
     values
   );

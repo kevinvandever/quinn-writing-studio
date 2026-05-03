@@ -56,8 +56,8 @@ const anthropic = new Anthropic({
 });
 
 const MODEL_MAP: Record<ModelSelection, string> = {
-  sonnet: 'claude-sonnet-4-20250514',
-  opus: 'claude-opus-4-20250514',
+  sonnet: process.env.CLAUDE_SONNET_MODEL || 'claude-sonnet-4-20250514',
+  opus: process.env.CLAUDE_OPUS_MODEL || 'claude-opus-4-20250514',
 };
 
 // ─── Core Functions ──────────────────────────────────────────────────────────

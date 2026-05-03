@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import { get, put, post } from '../../services/api-client';
+import { PersonaEditor } from './PersonaEditor';
 
 interface Settings {
   anthropic_api_key_set: boolean;
@@ -40,6 +41,9 @@ export function SettingsPanel() {
   const [staleCorpusDays, setStaleCorpusDays] = useState(30);
   const [emailEnabled, setEmailEnabled] = useState(false);
   const [notificationEmail, setNotificationEmail] = useState('');
+  const [grantSchedule, setGrantSchedule] = useState('0 6 * * *');
+  const [aiNewsSchedule, setAiNewsSchedule] = useState('0 */6 * * *');
+  const [publishingSchedule, setPublishingSchedule] = useState('0 7 * * *');
 
   useEffect(() => {
     loadSettings();
@@ -56,6 +60,11 @@ export function SettingsPanel() {
       setStaleCorpusDays(data.settings.stale_corpus_threshold_days);
       setEmailEnabled(data.settings.email_notifications_enabled);
       setNotificationEmail(data.settings.notification_email || '');
+      if (data.settings.intelligence_schedules) {
+        setGrantSchedule(data.settings.intelligence_schedules.grant_scanner || '0 6 * * *');
+        setAiNewsSchedule(data.settings.intelligence_schedules.ai_news_scanner || '0 */6 * * *');
+        setPublishingSchedule(data.settings.intelligence_schedules.publishing_scanner || '0 7 * * *');
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load settings');
     } finally {
@@ -79,6 +88,11 @@ export function SettingsPanel() {
         stale_corpus_threshold_days: staleCorpusDays,
         email_notifications_enabled: emailEnabled,
         notification_email: notificationEmail || null,
+        intelligence_schedules: {
+          grant_scanner: grantSchedule,
+          ai_news_scanner: aiNewsSchedule,
+          publishing_scanner: publishingSchedule,
+        },
       };
 
       // Only include API key if user entered a new one
@@ -291,6 +305,73 @@ export function SettingsPanel() {
       >
         {isSaving ? 'Saving...' : 'Save Settings'}
       </button>
+
+      {/* Intelligence Schedules */}
+      <section className="bg-white rounded-lg border border-gray-200 p-6 space-y-4">
+        <h3 className="text-lg font-semibold text-gray-900">Intelligence Schedules</h3>
+        <p className="text-sm text-gray-600">
+          Configure how often Quinn scans for grants, AI news, and publishing opportunities.
+          Uses cron syntax. Changes take effect on next server restart.
+        </p>
+
+        <div className="space-y-4">
+          <div>
+            <label htmlFor="grant-schedule" className="block text-sm font-medium text-gray-700 mb-1">
+              Grant Scanner
+            </label>
+            <input
+              id="grant-schedule"
+              type="text"
+              value={grantSchedule}
+              onChange={(e) => setGrantSchedule(e.target.value)}
+              className="w-full rounded-lg border border-gray-300 p-2.5 text-sm font-mono"
+            />
+            <p className="text-xs text-gray-500 mt-1">Default: 0 6 * * * (daily at 6:00 AM UTC)</p>
+          </div>
+
+          <div>
+            <label htmlFor="ai-news-schedule" className="block text-sm font-medium text-gray-700 mb-1">
+              AI News Scanner (Promptly)
+            </label>
+            <input
+              id="ai-news-schedule"
+              type="text"
+              value={aiNewsSchedule}
+              onChange={(e) => setAiNewsSchedule(e.target.value)}
+              className="w-full rounded-lg border border-gray-300 p-2.5 text-sm font-mono"
+            />
+            <p className="text-xs text-gray-500 mt-1">Default: 0 */6 * * * (every 6 hours)</p>
+          </div>
+
+          <div>
+            <label htmlFor="publishing-schedule" className="block text-sm font-medium text-gray-700 mb-1">
+              Publishing Scanner
+            </label>
+            <input
+              id="publishing-schedule"
+              type="text"
+              value={publishingSchedule}
+              onChange={(e) => setPublishingSchedule(e.target.value)}
+              className="w-full rounded-lg border border-gray-300 p-2.5 text-sm font-mono"
+            />
+            <p className="text-xs text-gray-500 mt-1">Default: 0 7 * * * (daily at 7:00 AM UTC)</p>
+          </div>
+        </div>
+
+        <button
+          onClick={handleSave}
+          disabled={isSaving}
+          className="px-4 py-2 bg-indigo-600 text-white rounded-lg text-sm font-medium
+                     hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+        >
+          {isSaving ? 'Saving...' : 'Save Schedules'}
+        </button>
+      </section>
+
+      {/* Persona Editor */}
+      <section className="bg-white rounded-lg border border-gray-200 p-6">
+        <PersonaEditor />
+      </section>
 
       {/* Data Export */}
       <section className="bg-white rounded-lg border border-gray-200 p-6 space-y-4">

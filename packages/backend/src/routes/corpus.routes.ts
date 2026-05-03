@@ -14,6 +14,7 @@ import {
   parseScrivenerZip,
   detectChanges,
   type ParsedDocument,
+  type ScrivenerParseResult,
 } from '../services/scrivener-parser.service.js';
 import { checkDocumentThemes } from '../services/theme-analysis.service.js';
 
@@ -67,7 +68,13 @@ router.post(
     }
 
     // Parse the Scrivener ZIP
-    const parseResult = parseScrivenerZip(req.file.buffer, req.file.originalname);
+    let parseResult: ScrivenerParseResult;
+    try {
+      parseResult = parseScrivenerZip(req.file.buffer, req.file.originalname);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Failed to parse file';
+      throw new AppError(400, ErrorCodes.VALIDATION_ERROR, `Scrivener import failed: ${message}`);
+    }
 
     // Get existing documents for this project (for change detection)
     const existingDocs = await query<{

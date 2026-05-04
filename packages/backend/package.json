@@ -12,7 +12,9 @@
     "migrate": "node-pg-migrate",
     "migrate:up": "NODE_OPTIONS='--import tsx/esm' node-pg-migrate up --migrations-dir src/db/migrations --envPath .env",
     "seed": "tsx src/db/seed.ts",
-    "seed:kevin": "tsx src/db/seed-kevin.ts"
+    "seed:kevin": "tsx src/db/seed-kevin.ts",
+    "db:restructure": "tsx src/db/restructure-persona.ts",
+    "db:import-skye": "tsx src/db/import-skye-sessions.ts"
   },
   "engines": {
     "node": ">=18.0.0"

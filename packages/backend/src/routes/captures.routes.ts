@@ -70,25 +70,25 @@ router.get('/', asyncHandler(async (req: Request, res: Response) => {
   let paramIndex = 2;
 
   if (project_id) {
-    conditions.push(`project_id = ${paramIndex}`);
+    conditions.push(`project_id = $${paramIndex}`);
     values.push(project_id);
     paramIndex++;
   }
 
   if (status) {
-    conditions.push(`status = ${paramIndex}`);
+    conditions.push(`status = $${paramIndex}`);
     values.push(status);
     paramIndex++;
   }
 
   if (from) {
-    conditions.push(`created_at >= ${paramIndex}`);
+    conditions.push(`created_at >= $${paramIndex}`);
     values.push(from);
     paramIndex++;
   }
 
   if (to) {
-    conditions.push(`created_at <= ${paramIndex}`);
+    conditions.push(`created_at <= $${paramIndex}`);
     values.push(to);
     paramIndex++;
   }
@@ -115,7 +115,7 @@ router.get('/', asyncHandler(async (req: Request, res: Response) => {
      FROM quick_captures
      WHERE ${whereClause}
      ORDER BY created_at DESC
-     LIMIT ${paramIndex} OFFSET ${paramIndex + 1}`,
+     LIMIT $${paramIndex} OFFSET $${paramIndex + 1}`,
     [...values, limitVal, offsetVal]
   );
 
@@ -144,19 +144,19 @@ router.put('/:id', asyncHandler(async (req: Request, res: Response) => {
   let paramIndex = 1;
 
   if (data.content !== undefined) {
-    setClauses.push(`content = ${paramIndex}`);
+    setClauses.push(`content = $${paramIndex}`);
     values.push(data.content);
     paramIndex++;
   }
 
   if (data.project_id !== undefined) {
-    setClauses.push(`project_id = ${paramIndex}`);
+    setClauses.push(`project_id = $${paramIndex}`);
     values.push(data.project_id);
     paramIndex++;
   }
 
   if (data.status !== undefined) {
-    setClauses.push(`status = ${paramIndex}`);
+    setClauses.push(`status = $${paramIndex}`);
     values.push(data.status);
     paramIndex++;
   }
@@ -181,7 +181,7 @@ router.put('/:id', asyncHandler(async (req: Request, res: Response) => {
   }>(
     `UPDATE quick_captures
      SET ${setClauses.join(', ')}
-     WHERE id = ${captureIdParam} AND user_id = ${userIdParam}
+     WHERE id = $${captureIdParam} AND user_id = $${userIdParam}
      RETURNING id, user_id, project_id, content, status, created_at`,
     values
   );

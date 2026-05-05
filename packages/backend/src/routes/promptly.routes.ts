@@ -25,13 +25,13 @@ promptlyRouter.get('/queue', asyncHandler(async (req: Request, res: Response) =>
   let paramIdx = 2;
 
   if (status && typeof status === 'string') {
-    whereClause += ` AND pqi.status = ${paramIdx}`;
+    whereClause += ` AND pqi.status = $${paramIdx}`;
     params.push(status);
     paramIdx++;
   }
 
   if (projectId && typeof projectId === 'string') {
-    whereClause += ` AND pqi.project_id = ${paramIdx}`;
+    whereClause += ` AND pqi.project_id = $${paramIdx}`;
     params.push(projectId);
     paramIdx++;
   }
@@ -164,7 +164,7 @@ promptlyRouter.put('/queue/:id', asyncHandler(async (req: Request, res: Response
     if (!validStatuses.includes(status)) {
       throw new AppError(400, ErrorCodes.VALIDATION_ERROR, 'Invalid status');
     }
-    updates.push(`status = ${paramIdx}`);
+    updates.push(`status = $${paramIdx}`);
     params.push(status);
     paramIdx++;
 
@@ -174,13 +174,13 @@ promptlyRouter.put('/queue/:id', asyncHandler(async (req: Request, res: Response
   }
 
   if (notes !== undefined) {
-    updates.push(`notes = ${paramIdx}`);
+    updates.push(`notes = $${paramIdx}`);
     params.push(notes);
     paramIdx++;
   }
 
   if (substackPostId !== undefined) {
-    updates.push(`substack_post_id = ${paramIdx}`);
+    updates.push(`substack_post_id = $${paramIdx}`);
     params.push(substackPostId);
     paramIdx++;
   }
@@ -193,7 +193,7 @@ promptlyRouter.put('/queue/:id', asyncHandler(async (req: Request, res: Response
   const result = await query(
     `UPDATE promptly_queue_items
      SET ${updates.join(', ')}
-     WHERE id = ${paramIdx}
+     WHERE id = $${paramIdx}
      RETURNING id, project_id, intelligence_item_id, status, substack_post_id, coaching_session_id, notes, selected_at, published_at`,
     params
   );

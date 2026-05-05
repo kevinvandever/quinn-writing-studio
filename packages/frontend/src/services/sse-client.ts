@@ -58,12 +58,21 @@ export function createSSEStream(
   const abortController = new AbortController();
 
   // Start the fetch request
+  const token = (() => {
+    try { return localStorage.getItem('quinn_token'); } catch { return null; }
+  })();
+
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    Accept: 'text/event-stream',
+  };
+  if (token) {
+    headers['Authorization'] = `Bearer ${token}`;
+  }
+
   const fetchPromise = fetch(`${BASE_URL}${url}`, {
     method,
-    headers: {
-      'Content-Type': 'application/json',
-      Accept: 'text/event-stream',
-    },
+    headers,
     credentials: 'include',
     signal: abortController.signal,
     body: body !== undefined ? JSON.stringify(body) : undefined,

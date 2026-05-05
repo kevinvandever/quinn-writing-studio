@@ -153,15 +153,15 @@ router.put('/goals/:id', asyncHandler(async (req: Request, res: Response) => {
   let paramIndex = 1;
 
   if (title !== undefined) {
-    updates.push(`title = ${paramIndex++}`);
+    updates.push(`title = $${paramIndex++}`);
     values.push(title);
   }
   if (target_value !== undefined) {
-    updates.push(`target_value = ${paramIndex++}`);
+    updates.push(`target_value = $${paramIndex++}`);
     values.push(target_value);
   }
   if (current_value !== undefined) {
-    updates.push(`current_value = ${paramIndex++}`);
+    updates.push(`current_value = $${paramIndex++}`);
     values.push(current_value);
   }
   if (status !== undefined) {
@@ -169,15 +169,15 @@ router.put('/goals/:id', asyncHandler(async (req: Request, res: Response) => {
     if (!validStatuses.includes(status)) {
       throw new AppError(400, ErrorCodes.VALIDATION_ERROR, `status must be one of: ${validStatuses.join(', ')}`);
     }
-    updates.push(`status = ${paramIndex++}`);
+    updates.push(`status = $${paramIndex++}`);
     values.push(status);
   }
   if (behind_threshold !== undefined) {
-    updates.push(`behind_threshold = ${paramIndex++}`);
+    updates.push(`behind_threshold = $${paramIndex++}`);
     values.push(behind_threshold);
   }
   if (due_date !== undefined) {
-    updates.push(`due_date = ${paramIndex++}`);
+    updates.push(`due_date = $${paramIndex++}`);
     values.push(due_date);
   }
 
@@ -202,7 +202,7 @@ router.put('/goals/:id', asyncHandler(async (req: Request, res: Response) => {
     due_date: Date | null;
   }>(
     `UPDATE goals SET ${updates.join(', ')}
-     WHERE id = ${paramIndex}
+     WHERE id = $${paramIndex}
      RETURNING id, project_id, goal_type, title, target_value, target_unit, period,
                current_value, status, behind_threshold, created_at, due_date`,
     values

@@ -11,12 +11,21 @@ export interface AuthUser {
 }
 
 /**
- * Middleware that extracts JWT from the 'quinn_session' cookie,
- * validates it using JWT_SECRET, and attaches user info to the request.
+ * Middleware that extracts JWT from the 'quinn_session' cookie or
+ * Authorization Bearer header, validates it using JWT_SECRET, and
+ * attaches user info to the request.
  * Returns 401 for invalid or missing tokens.
  */
 export function requireAuth(req: Request, _res: Response, next: NextFunction): void {
-  const token = req.cookies?.[COOKIE_NAME] as string | undefined;
+  // Try cookie first, then Authorization header (mobile fallback)
+  let token = req.cookies?.[COOKIE_NAME] as string | undefined;
+
+  if (!token) {
+    const authHeader = req.headers.authorization;
+    if (authHeader?.startsWith('Bearer ')) {
+      token = authHeader.slice(7);
+    }
+  }
 
   if (!token) {
     throw new AppError(401, ErrorCodes.UNAUTHORIZED, 'Authentication required');

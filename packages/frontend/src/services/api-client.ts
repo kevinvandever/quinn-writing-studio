@@ -3,6 +3,15 @@ const BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:3001';
 // Log the API URL on startup for debugging
 console.log('[API Client] Base URL:', BASE_URL);
 
+// Lazy import to avoid circular dependency
+function getToken(): string | null {
+  try {
+    return localStorage.getItem('quinn_token');
+  } catch {
+    return null;
+  }
+}
+
 export class ApiError extends Error {
   constructor(
     public status: number,
@@ -34,8 +43,10 @@ async function parseErrorResponse(response: Response): Promise<ApiError> {
 }
 
 function handle401(): never {
-  // Clear any local auth state and redirect to login
-  window.location.href = '/login';
+  // Don't redirect if already on login page (prevents flash loop)
+  if (window.location.pathname !== '/login') {
+    window.location.href = '/login';
+  }
   throw new ApiError(401, 'UNAUTHORIZED', 'Session expired');
 }
 
@@ -52,6 +63,11 @@ async function request<T>(
 
   let response: Response;
   try {
+    const token = getToken();
+    if (token) {
+      headers['Authorization'] = `Bearer ${token}`;
+    }
+
     response = await fetch(`${BASE_URL}${path}`, {
       method,
       headers,

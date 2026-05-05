@@ -81,6 +81,7 @@ router.post('/login', asyncHandler(async (req: Request, res: Response) => {
       email: user.email,
       displayName: user.display_name,
     },
+    token,
   });
 }));
 
@@ -129,6 +130,7 @@ router.post('/register', asyncHandler(async (req: Request, res: Response) => {
       email: user.email,
       displayName: user.display_name,
     },
+    token,
   });
 }));
 
@@ -152,7 +154,15 @@ router.post('/logout', (_req: Request, res: Response) => {
  * Validate current JWT from cookie, return user info if valid.
  */
 router.get('/session', asyncHandler(async (req: Request, res: Response) => {
-  const token = req.cookies?.[COOKIE_NAME] as string | undefined;
+  // Try cookie first, then Authorization header
+  let token = req.cookies?.[COOKIE_NAME] as string | undefined;
+
+  if (!token) {
+    const authHeader = req.headers.authorization;
+    if (authHeader?.startsWith('Bearer ')) {
+      token = authHeader.slice(7);
+    }
+  }
 
   if (!token) {
     throw new AppError(401, ErrorCodes.UNAUTHORIZED, 'No active session');

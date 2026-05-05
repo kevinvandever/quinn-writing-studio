@@ -22,7 +22,7 @@ intelligenceRouter.get('/grants', asyncHandler(async (req: Request, res: Respons
   let paramIdx = 1;
 
   if (status && typeof status === 'string') {
-    whereClause += ` AND status = ${paramIdx}`;
+    whereClause += ` AND status = $${paramIdx}`;
     params.push(status);
     paramIdx++;
   }
@@ -43,7 +43,7 @@ intelligenceRouter.get('/grants', asyncHandler(async (req: Request, res: Respons
        deadline ASC,
        relevance_score DESC,
        discovered_at DESC
-     LIMIT ${paramIdx} OFFSET ${paramIdx + 1}`,
+     LIMIT $${paramIdx} OFFSET $${paramIdx + 1}`,
     [...params, parseInt(limit as string, 10), parseInt(offset as string, 10)]
   );
 
@@ -66,7 +66,7 @@ intelligenceRouter.get('/ai-news', asyncHandler(async (req: Request, res: Respon
   let paramIdx = 1;
 
   if (status && typeof status === 'string') {
-    whereClause += ` AND status = ${paramIdx}`;
+    whereClause += ` AND status = $${paramIdx}`;
     params.push(status);
     paramIdx++;
   }
@@ -82,7 +82,7 @@ intelligenceRouter.get('/ai-news', asyncHandler(async (req: Request, res: Respon
      FROM intelligence_items
      ${whereClause}
      ORDER BY relevance_score DESC, discovered_at DESC
-     LIMIT ${paramIdx} OFFSET ${paramIdx + 1}`,
+     LIMIT $${paramIdx} OFFSET $${paramIdx + 1}`,
     [...params, parseInt(limit as string, 10), parseInt(offset as string, 10)]
   );
 
@@ -134,13 +134,13 @@ intelligenceRouter.get('/publishing', asyncHandler(async (req: Request, res: Res
   let paramIdx = 1;
 
   if (status && typeof status === 'string') {
-    whereClause += ` AND status = ${paramIdx}`;
+    whereClause += ` AND status = $${paramIdx}`;
     params.push(status);
     paramIdx++;
   }
 
   if (subcategory && typeof subcategory === 'string') {
-    whereClause += ` AND subcategory = ${paramIdx}`;
+    whereClause += ` AND subcategory = $${paramIdx}`;
     params.push(subcategory);
     paramIdx++;
   }
@@ -159,7 +159,7 @@ intelligenceRouter.get('/publishing', asyncHandler(async (req: Request, res: Res
        CASE WHEN deadline IS NOT NULL THEN 0 ELSE 1 END,
        deadline ASC,
        discovered_at DESC
-     LIMIT ${paramIdx} OFFSET ${paramIdx + 1}`,
+     LIMIT $${paramIdx} OFFSET $${paramIdx + 1}`,
     [...params, parseInt(limit as string, 10), parseInt(offset as string, 10)]
   );
 

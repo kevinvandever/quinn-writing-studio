@@ -42,12 +42,12 @@ async function parseErrorResponse(response: Response): Promise<ApiError> {
   }
 }
 
-function handle401(): never {
+function handle401(message: string): never {
   // Don't redirect if already on login page (prevents flash loop)
   if (window.location.pathname !== '/login') {
     window.location.href = '/login';
   }
-  throw new ApiError(401, 'UNAUTHORIZED', 'Session expired');
+  throw new ApiError(401, 'UNAUTHORIZED', message);
 }
 
 async function request<T>(
@@ -81,7 +81,15 @@ async function request<T>(
   }
 
   if (response.status === 401) {
-    handle401();
+    // Parse the actual error from the server before handling
+    const error = await parseErrorResponse(response);
+    // Only redirect to login for session/auth failures on non-auth endpoints
+    // Auth endpoints (login/register) should surface the real error message
+    const isAuthEndpoint = path.startsWith('/api/auth/login') || path.startsWith('/api/auth/register');
+    if (isAuthEndpoint) {
+      throw error;
+    }
+    handle401(error.message || 'Session expired');
   }
 
   if (!response.ok) {

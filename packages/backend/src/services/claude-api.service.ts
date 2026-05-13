@@ -456,13 +456,24 @@ function buildPersonaSection(personaConfig: Record<string, unknown>): string {
   const voice = personaConfig['voice'] as Record<string, unknown> | undefined;
   if (voice) {
     if (voice['tone']) lines.push(`Tone: ${voice['tone']}`);
+
+    const edge = voice['the_edge_does_what'] as string[] | undefined;
+    if (edge && edge.length > 0) {
+      lines.push(
+        `\nWhat the edge in your voice does in practice:\n${edge.map((e) => `- ${e}`).join('\n')}`
+      );
+    }
+
     const patterns = voice['communication_patterns'] as string[] | undefined;
     if (patterns && patterns.length > 0) {
-      lines.push(`Communication patterns: ${patterns.join('; ')}`);
+      lines.push(
+        `\nCommunication patterns:\n${patterns.map((p) => `- ${p}`).join('\n')}`
+      );
     }
+
     const partnership = voice['partnership_language'] as string[] | undefined;
     if (partnership && partnership.length > 0) {
-      lines.push(`Partnership language: ${partnership.join('; ')}`);
+      lines.push(`\nPartnership language to reach for: ${partnership.join('; ')}`);
     }
   }
 
@@ -477,12 +488,61 @@ function buildPersonaSection(personaConfig: Record<string, unknown>): string {
     if (literary && literary.length > 0) {
       lines.push(`\nLiterary knowledge: ${literary.join(', ')}`);
     }
+
     if (expertise['north_star_author']) {
       lines.push(`North star author: ${expertise['north_star_author']}`);
     }
+
     const craftPrinciples = expertise['craft_principles'] as string[] | undefined;
     if (craftPrinciples && craftPrinciples.length > 0) {
-      lines.push(`Craft principles: ${craftPrinciples.join('; ')}`);
+      lines.push(
+        `\nCraft principles (apply lightly to non-literary work like AI journalism):\n${craftPrinciples.map((c) => `- ${c}`).join('\n')}`
+      );
+    }
+
+    const techniques = expertise['techniques_to_invoke'] as string[] | undefined;
+    if (techniques && techniques.length > 0) {
+      lines.push(
+        `\nTechniques to invoke when a draft would benefit (tools, not rules):\n${techniques.map((t) => `- ${t}`).join('\n')}`
+      );
+    }
+  }
+
+  const ethics = personaConfig['ethics'] as Record<string, unknown> | undefined;
+  if (ethics) {
+    const familyQuestions = ethics['family_privacy_questions'] as string[] | undefined;
+    if (familyQuestions && familyQuestions.length > 0) {
+      lines.push(
+        `\nWhen the writer is wrestling with what is writable about family, do not rule. Offer these questions:\n${familyQuestions.map((q) => `- ${q}`).join('\n')}`
+      );
+    }
+    const releaseValve = ethics['family_privacy_release_valve'] as string | undefined;
+    if (releaseValve) {
+      lines.push(releaseValve);
+    }
+  }
+
+  const failureModes = personaConfig['failure_modes'] as string[] | undefined;
+  if (failureModes && failureModes.length > 0) {
+    lines.push(
+      `\nDrift signals — what going wrong looks like. If you notice these patterns in yourself, course-correct:\n${failureModes.map((f) => `- ${f}`).join('\n')}`
+    );
+  }
+
+  const kevinProfile = personaConfig['kevin_profile'] as Record<string, unknown> | undefined;
+  if (kevinProfile) {
+    const writerStyle = kevinProfile['writer_style'] as string[] | undefined;
+    if (writerStyle && writerStyle.length > 0) {
+      lines.push(
+        `\nThe writer's style (what to preserve):\n${writerStyle.map((s) => `- ${s}`).join('\n')}`
+      );
+    }
+  }
+
+  if (identity) {
+    const signature = identity['partnership_signature'] as string | undefined;
+    if (signature) {
+      lines.push(`\nClose responses with: ${signature}`);
     }
   }
 
@@ -498,6 +558,9 @@ function buildProjectSection(project: ProjectContext): string {
   if (project.description) {
     lines.push(`Description: ${project.description}`);
   }
+  lines.push(
+    '\nThe writer selected this project in the navigation when they started this session. Treat it as the working context. However, if their message clearly concerns a different one of their projects — not just a passing reference, but the substantive subject of what they are asking about — surface that observation and ask whether they meant to switch, rather than silently coaching them in the wrong frame.'
+  );
   return lines.join('\n');
 }
 

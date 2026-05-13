@@ -14,6 +14,8 @@
     "seed": "tsx src/db/seed.ts",
     "seed:kevin": "tsx src/db/seed-kevin.ts",
     "db:restructure": "tsx src/db/restructure-persona.ts",
+    "db:update-projects": "tsx src/db/update-project-descriptions.ts",
+    "db:update-persona": "tsx src/db/update-persona-v3.ts",
     "db:import-skye": "tsx src/db/import-skye-sessions.ts"
   },
   "engines": {

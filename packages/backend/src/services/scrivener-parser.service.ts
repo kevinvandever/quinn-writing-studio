@@ -94,7 +94,7 @@ export function parseScrivenerZip(zipBuffer: Buffer, filename: string): Scrivene
       const uuid = item['@_UUID'];
       const type = item['@_Type'];
       const title = item.Title || 'Untitled';
-      const isFolder = type === 'Folder';
+      const isFolder = type === 'Folder' || type === 'DraftFolder' || type === 'ResearchFolder' || type === 'TrashFolder';
 
       // Try to read the content.rtf file for this document
       let content = '';

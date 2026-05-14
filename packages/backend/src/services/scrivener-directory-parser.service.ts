@@ -71,7 +71,7 @@ export function parseScrivenerDirectory(scrivPath: string): ScrivenerParseResult
       const uuid = item['@_UUID'];
       const type = item['@_Type'];
       const title = item.Title || 'Untitled';
-      const isFolder = type === 'Folder';
+      const isFolder = type === 'Folder' || type === 'DraftFolder' || type === 'ResearchFolder' || type === 'TrashFolder';
 
       let content = '';
       let wordCount = 0;

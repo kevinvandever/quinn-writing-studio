@@ -16,7 +16,8 @@
     "db:restructure": "tsx src/db/restructure-persona.ts",
     "db:update-projects": "tsx src/db/update-project-descriptions.ts",
     "db:update-persona": "tsx src/db/update-persona-v3.ts",
-    "db:import-skye": "tsx src/db/import-skye-sessions.ts"
+    "db:import-skye": "tsx src/db/import-skye-sessions.ts",
+    "scriv:watch": "tsx src/tools/scrivener-watcher.ts"
   },
   "engines": {
     "node": ">=18.0.0"

@@ -307,6 +307,146 @@ router.get('/projects/:id/corpus/imports', asyncHandler(async (req: Request, res
 }));
 
 /**
+ * POST /api/projects/:id/corpus/sync
+ * Accept pre-parsed Scrivener data as JSON (used by the local watcher agent).
+ * Same logic as the upload endpoint but skips the ZIP parsing step.
+ */
+router.post('/projects/:id/corpus/sync', asyncHandler(async (req: Request, res: Response) => {
+  const userId = req.user!.userId;
+  const projectId = req.params.id;
+  const { filename, documents, totalWordCount, documentCount, parseErrors } = req.body;
+
+  if (!filename || !documents || totalWordCount === undefined || documentCount === undefined) {
+    throw new AppError(400, ErrorCodes.VALIDATION_ERROR, 'filename, documents, totalWordCount, and documentCount are required');
+  }
+
+  // Verify project ownership
+  const projectResult = await query<{ id: string }>(
+    'SELECT id FROM projects WHERE id = $1 AND user_id = $2',
+    [projectId, userId]
+  );
+
+  if (projectResult.rows.length === 0) {
+    throw new AppError(404, ErrorCodes.NOT_FOUND, 'Project not found');
+  }
+
+  // Get existing documents for change detection
+  const existingDocs = await query<{
+    id: string;
+    source_id: string;
+    title: string;
+    content_hash: string;
+    word_count: number;
+    content: string;
+  }>(
+    `SELECT id, source_id, title, content_hash, word_count, content
+     FROM corpus_documents
+     WHERE project_id = $1 AND source_type = 'scrivener'`,
+    [projectId]
+  );
+
+  // Detect changes
+  const diffSummary = detectChanges(documents, existingDocs.rows);
+
+  // If nothing changed, return early
+  if (diffSummary.added.length === 0 && diffSummary.modified.length === 0 && diffSummary.deleted.length === 0) {
+    res.json({ import: null, message: 'No changes detected' });
+    return;
+  }
+
+  // Start a transaction for the import
+  const client = await getClient();
+
+  try {
+    await client.query('BEGIN');
+
+    // Create pre-import snapshots for modified documents
+    for (const modified of diffSummary.modified) {
+      const existingDoc = existingDocs.rows.find((d) => d.source_id === modified.uuid);
+      if (existingDoc) {
+        await client.query(
+          `INSERT INTO draft_snapshots (document_id, content, word_count, trigger)
+           VALUES ($1, $2, $3, 'pre_import_update')`,
+          [existingDoc.id, existingDoc.content, existingDoc.word_count]
+        );
+      }
+    }
+
+    // Create the import record
+    const importResult = await client.query<{ id: string }>(
+      `INSERT INTO scrivener_imports (project_id, filename, document_count, total_word_count, parse_errors, diff_summary)
+       VALUES ($1, $2, $3, $4, $5, $6)
+       RETURNING id`,
+      [
+        projectId,
+        filename,
+        documentCount,
+        totalWordCount,
+        JSON.stringify(parseErrors || []),
+        JSON.stringify(diffSummary),
+      ]
+    );
+
+    const importId = importResult.rows[0]!.id;
+
+    // Delete existing scrivener documents for this project (we'll re-insert)
+    await client.query(
+      `DELETE FROM corpus_documents WHERE project_id = $1 AND source_type = 'scrivener'`,
+      [projectId]
+    );
+
+    // Insert all documents from the parsed data
+    await insertDocuments(client, projectId as string, importId, documents, null);
+
+    // Log activity event
+    const previousTotalWordCount = existingDocs.rows.reduce(
+      (sum, doc) => sum + (doc.word_count || 0),
+      0
+    );
+    const wordCountDiff = totalWordCount - previousTotalWordCount;
+
+    await client.query(
+      `INSERT INTO activity_events (user_id, project_id, event_type, metadata)
+       VALUES ($1, $2, 'scrivener_import', $3)`,
+      [
+        userId,
+        projectId,
+        JSON.stringify({
+          import_id: importId,
+          filename,
+          document_count: documentCount,
+          total_word_count: totalWordCount,
+          previous_word_count: previousTotalWordCount,
+          word_count_diff: wordCountDiff,
+          added_count: diffSummary.added.length,
+          modified_count: diffSummary.modified.length,
+          deleted_count: diffSummary.deleted.length,
+          source: 'watcher',
+        }),
+      ]
+    );
+
+    await client.query('COMMIT');
+
+    res.status(201).json({
+      import: {
+        id: importId,
+        filename,
+        documentCount,
+        totalWordCount,
+        parseErrors: parseErrors || [],
+        diffSummary,
+      },
+    });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
+  }
+}));
+
+/**
  * POST /api/projects/:id/drafts/upload
  * Manual paste/upload fallback for adding content to corpus.
  * Accepts { title, content } in body and stores as corpus_document with source_type='manual_upload'.

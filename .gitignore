@@ -35,3 +35,6 @@ coverage/
 
 # Claude Code
 .claude/
+
+# Scrivener watcher state
+.scriv-watcher-state.json

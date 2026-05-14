@@ -2,38 +2,40 @@
 /**
  * Scrivener Watcher — Local Agent
  *
- * Watches a .scriv package directory for file changes using macOS FSEvents.
- * When changes are detected (debounced), parses the project and uploads
- * the corpus to the Quinn Writing Studio backend.
+ * Watches the Scrivener automatic backup folder for new ZIP files.
+ * When a new backup appears (triggered by closing a project in Scrivener),
+ * it finds the most recent backup matching the configured project name,
+ * parses it using the existing ZIP parser, and syncs to the Quinn backend.
  *
  * Usage:
  *   npm run scriv:watch -w @quinn/backend
  *
  * Environment variables (or .env file):
- *   SCRIV_PATH       — Path to the .scriv package (required)
- *   SCRIV_PROJECT_ID — Quinn project ID to sync to (required)
- *   QUINN_API_URL    — Backend API URL (default: https://your-railway-url)
- *   QUINN_EMAIL      — Login email for auth
- *   QUINN_PASSWORD   — Login password for auth
+ *   SCRIV_BACKUP_DIR  — Path to Scrivener's backup folder (required)
+ *   SCRIV_PROJECT_NAME — Name prefix to match in backup filenames (required)
+ *   SCRIV_PROJECT_ID  — Quinn project ID to sync to (required)
+ *   QUINN_API_URL     — Backend API URL (required)
+ *   QUINN_EMAIL       — Login email for auth (required)
+ *   QUINN_PASSWORD    — Login password for auth (required)
  *
  * The watcher:
  *   1. Authenticates with the backend to get a JWT
- *   2. Watches the .scriv directory for filesystem changes
- *   3. On change (debounced 5s), parses the .scriv package
- *   4. Computes a content hash of the full corpus
- *   5. If the hash differs from last sync, uploads via the corpus API
+ *   2. Watches the backup folder for new/changed files
+ *   3. On change (debounced 5s), finds the most recent matching backup ZIP
+ *   4. Parses it using the existing Scrivener ZIP parser
+ *   5. If content hash differs from last sync, uploads via the corpus API
  */
 
 import 'dotenv/config';
-import { watch, existsSync, readFileSync, writeFileSync } from 'fs';
+import { watch, existsSync, readFileSync, writeFileSync, readdirSync, statSync } from 'fs';
 import { join } from 'path';
 import { createHash } from 'crypto';
-import { parseScrivenerDirectory } from '../services/scrivener-directory-parser.service.js';
-import { flattenDocuments } from '../services/scrivener-parser.service.js';
+import { parseScrivenerZip, flattenDocuments } from '../services/scrivener-parser.service.js';
 
 // ─── Configuration ───────────────────────────────────────────────────────────
 
-const SCRIV_PATH = process.env.SCRIV_PATH;
+const BACKUP_DIR = process.env.SCRIV_BACKUP_DIR;
+const PROJECT_NAME = process.env.SCRIV_PROJECT_NAME;
 const PROJECT_ID = process.env.SCRIV_PROJECT_ID;
 const API_URL = process.env.QUINN_API_URL || 'http://localhost:3001';
 const EMAIL = process.env.QUINN_EMAIL;
@@ -41,33 +43,34 @@ const PASSWORD = process.env.QUINN_PASSWORD;
 const DEBOUNCE_MS = parseInt(process.env.SCRIV_DEBOUNCE_MS || '5000', 10);
 const STATE_FILE = join(process.cwd(), '.scriv-watcher-state.json');
 
-if (!SCRIV_PATH || !PROJECT_ID || !EMAIL || !PASSWORD) {
+if (!BACKUP_DIR || !PROJECT_NAME || !PROJECT_ID || !EMAIL || !PASSWORD) {
   console.error(`
 Scrivener Watcher — Missing required configuration.
 
 Required environment variables:
-  SCRIV_PATH         Path to your .scriv package
-  SCRIV_PROJECT_ID   Quinn project ID to sync to
-  QUINN_EMAIL        Your login email
-  QUINN_PASSWORD     Your login password
+  SCRIV_BACKUP_DIR    Path to Scrivener's backup folder
+  SCRIV_PROJECT_NAME  Project name prefix to match in backup filenames
+  SCRIV_PROJECT_ID    Quinn project ID to sync to
+  QUINN_API_URL       Backend URL
+  QUINN_EMAIL         Your login email
+  QUINN_PASSWORD      Your login password
 
 Optional:
-  QUINN_API_URL      Backend URL (default: http://localhost:3001)
-  SCRIV_DEBOUNCE_MS  Debounce delay in ms (default: 5000)
+  SCRIV_DEBOUNCE_MS   Debounce delay in ms (default: 5000)
 
-Example:
-  SCRIV_PATH="/Users/kevin/Dropbox/EssayCollection.scriv" \\
-  SCRIV_PROJECT_ID="a4509dae-b732-4a9f-9aa0-af4958c14cee" \\
-  QUINN_API_URL="https://your-app.railway.app" \\
-  QUINN_EMAIL="kevin.vandever@mac.com" \\
-  QUINN_PASSWORD="yourpassword" \\
-  npm run scriv:watch -w @quinn/backend
+Example .env:
+  SCRIV_BACKUP_DIR="/Users/kevinvandever/Library/Application Support/Scrivener/Backups"
+  SCRIV_PROJECT_NAME="Essay Collection"
+  SCRIV_PROJECT_ID="a4509dae-b732-4a9f-9aa0-af4958c14cee"
+  QUINN_API_URL="https://your-app.railway.app"
+  QUINN_EMAIL="kevin.vandever@mac.com"
+  QUINN_PASSWORD="yourpassword"
 `);
   process.exit(1);
 }
 
-if (!existsSync(SCRIV_PATH)) {
-  console.error(`Error: Scrivener project not found at: ${SCRIV_PATH}`);
+if (!existsSync(BACKUP_DIR)) {
+  console.error(`Error: Backup directory not found at: ${BACKUP_DIR}`);
   process.exit(1);
 }
 
@@ -76,6 +79,7 @@ if (!existsSync(SCRIV_PATH)) {
 interface WatcherState {
   lastCorpusHash: string;
   lastSyncAt: string;
+  lastBackupFile: string;
 }
 
 function loadState(): WatcherState | null {
@@ -91,6 +95,31 @@ function loadState(): WatcherState | null {
 
 function saveState(state: WatcherState): void {
   writeFileSync(STATE_FILE, JSON.stringify(state, null, 2));
+}
+
+// ─── Backup File Discovery ───────────────────────────────────────────────────
+
+/**
+ * Find the most recent backup ZIP matching the project name.
+ * Scrivener names backups like "Essay Collection.zip" or
+ * "Essay Collection 2024-01-15.zip" depending on settings.
+ */
+function findLatestBackup(): { path: string; mtime: Date } | null {
+  const files = readdirSync(BACKUP_DIR!);
+  const matchingZips = files
+    .filter((f) => f.toLowerCase().includes(PROJECT_NAME!.toLowerCase()) && f.endsWith('.zip'))
+    .map((f) => {
+      const fullPath = join(BACKUP_DIR!, f);
+      const stat = statSync(fullPath);
+      return { path: fullPath, filename: f, mtime: stat.mtime };
+    })
+    .sort((a, b) => b.mtime.getTime() - a.mtime.getTime());
+
+  if (matchingZips.length === 0) {
+    return null;
+  }
+
+  return matchingZips[0]!;
 }
 
 // ─── Auth ────────────────────────────────────────────────────────────────────
@@ -134,16 +163,25 @@ function computeCorpusHash(documents: ReturnType<typeof flattenDocuments>): stri
 }
 
 async function syncCorpus(): Promise<void> {
-  console.log(`[Sync] Parsing ${SCRIV_PATH}...`);
+  const backup = findLatestBackup();
+  if (!backup) {
+    console.log(`[Sync] No backup ZIPs found matching "${PROJECT_NAME}" in ${BACKUP_DIR}`);
+    return;
+  }
 
-  const parseResult = parseScrivenerDirectory(SCRIV_PATH!);
+  console.log(`[Sync] Found backup: ${backup.path}`);
+  console.log(`[Sync] Modified: ${backup.mtime.toLocaleString()}`);
+
+  // Read and parse the ZIP
+  const zipBuffer = readFileSync(backup.path);
+  const parseResult = parseScrivenerZip(zipBuffer, backup.path);
   const flatDocs = flattenDocuments(parseResult.documents);
   const corpusHash = computeCorpusHash(flatDocs);
 
   // Check if anything actually changed
   const state = loadState();
   if (state && state.lastCorpusHash === corpusHash) {
-    console.log('[Sync] No content changes detected (hash unchanged). Skipping upload.');
+    console.log('[Sync] No content changes since last sync. Skipping upload.');
     return;
   }
 
@@ -156,11 +194,9 @@ async function syncCorpus(): Promise<void> {
     }
   }
 
-  // Upload as a ZIP to the existing endpoint (reuse existing infrastructure)
-  // We'll create an in-memory ZIP from the parsed data and POST it
+  // Upload via the sync endpoint
   const token = await getToken();
 
-  // Use the parsed data directly via a new JSON endpoint
   const response = await fetch(`${API_URL}/api/projects/${PROJECT_ID}/corpus/sync`, {
     method: 'POST',
     headers: {
@@ -199,20 +235,17 @@ async function syncCorpus(): Promise<void> {
       const body = await retryResponse.text();
       throw new Error(`Sync failed after re-auth (${retryResponse.status}): ${body}`);
     }
-
-    const result = await retryResponse.json();
-    console.log('[Sync] Upload complete:', JSON.stringify(result, null, 2));
   } else if (!response.ok) {
     const body = await response.text();
     throw new Error(`Sync failed (${response.status}): ${body}`);
-  } else {
-    const result = await response.json() as { import?: { diffSummary?: { added?: unknown[]; modified?: unknown[]; deleted?: unknown[] } } };
-    console.log('[Sync] Upload complete.');
-    if (result.import) {
-      const diff = result.import.diffSummary;
-      if (diff) {
-        console.log(`  Added: ${diff.added?.length || 0}, Modified: ${diff.modified?.length || 0}, Deleted: ${diff.deleted?.length || 0}`);
-      }
+  }
+
+  const result = await response.json() as { import?: { diffSummary?: { added?: unknown[]; modified?: unknown[]; deleted?: unknown[] } } };
+  console.log('[Sync] Upload complete.');
+  if (result.import) {
+    const diff = result.import.diffSummary;
+    if (diff) {
+      console.log(`  Added: ${diff.added?.length || 0}, Modified: ${diff.modified?.length || 0}, Deleted: ${diff.deleted?.length || 0}`);
     }
   }
 
@@ -220,6 +253,7 @@ async function syncCorpus(): Promise<void> {
   saveState({
     lastCorpusHash: corpusHash,
     lastSyncAt: new Date().toISOString(),
+    lastBackupFile: backup.path,
   });
 }
 
@@ -253,10 +287,10 @@ console.log(`
 ╔══════════════════════════════════════════════════════════╗
 ║         Scrivener Watcher — Quinn Writing Studio        ║
 ╠══════════════════════════════════════════════════════════╣
-║  Watching: ${SCRIV_PATH.slice(-46).padEnd(46)}║
-║  Project:  ${PROJECT_ID.padEnd(46)}║
-║  API:      ${API_URL.slice(-46).padEnd(46)}║
-║  Debounce: ${(DEBOUNCE_MS + 'ms').padEnd(46)}║
+║  Backup dir: ${(BACKUP_DIR ?? '').slice(-43).padEnd(43)}║
+║  Project:    ${(PROJECT_NAME ?? '').padEnd(43)}║
+║  API:        ${API_URL.slice(-43).padEnd(43)}║
+║  Debounce:   ${(DEBOUNCE_MS + 'ms').padEnd(43)}║
 ╚══════════════════════════════════════════════════════════╝
 `);
 
@@ -264,20 +298,20 @@ console.log(`
 console.log('[Watcher] Running initial sync...');
 syncCorpus()
   .then(() => {
-    console.log('[Watcher] Initial sync complete. Watching for changes...\n');
+    console.log('[Watcher] Initial sync complete. Watching for new backups...\n');
   })
   .catch((err) => {
     console.error('[Watcher] Initial sync failed:', err instanceof Error ? err.message : err);
-    console.log('[Watcher] Will retry on next file change.\n');
+    console.log('[Watcher] Will retry when a new backup appears.\n');
   });
 
-// Watch the .scriv directory recursively
-watch(SCRIV_PATH, { recursive: true }, (_eventType, filename) => {
-  // Ignore .DS_Store and other system files
-  if (filename && (filename.includes('.DS_Store') || filename.startsWith('.'))) {
-    return;
+// Watch the backup directory for new files
+watch(BACKUP_DIR, (_eventType, filename) => {
+  // Only react to ZIP files matching our project
+  if (filename && filename.endsWith('.zip') && filename.toLowerCase().includes(PROJECT_NAME!.toLowerCase())) {
+    console.log(`[Watcher] New backup detected: ${filename}`);
+    onFileChange();
   }
-  onFileChange();
 });
 
 // Handle graceful shutdown

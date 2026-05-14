@@ -86,6 +86,9 @@ export function stripRtf(rtfContent: string): string {
   text = text.replace(/ \n/g, '\n');
   text = text.replace(/\n{3,}/g, '\n\n');
 
+  // Remove null bytes (PostgreSQL rejects these in text columns)
+  text = text.replace(/\0/g, '');
+
   return text.trim();
 }
 

@@ -553,6 +553,10 @@ async function insertDocuments(
   parentId: string | null
 ): Promise<void> {
   for (const doc of documents) {
+    // Strip null bytes that PostgreSQL rejects in text columns
+    const safeContent = (doc.content || '').replace(/\0/g, '');
+    const safeTitle = (doc.title || '').replace(/\0/g, '');
+
     const result = await client.query<{ id: string }>(
       `INSERT INTO corpus_documents (project_id, source_type, source_id, title, content, content_hash, word_count, parent_id, sort_order, is_folder, import_id)
        VALUES ($1, 'scrivener', $2, $3, $4, $5, $6, $7, $8, $9, $10)
@@ -560,8 +564,8 @@ async function insertDocuments(
       [
         projectId,
         doc.uuid,
-        doc.title,
-        doc.content,
+        safeTitle,
+        safeContent,
         doc.contentHash,
         doc.wordCount,
         parentId,

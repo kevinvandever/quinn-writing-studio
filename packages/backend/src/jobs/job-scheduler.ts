@@ -41,6 +41,18 @@ const cronJobs: cron.ScheduledTask[] = [];
 function getQueue(): Bull.Queue<JobPayload> {
   if (!intelligenceQueue) {
     intelligenceQueue = new Bull<JobPayload>('intelligence-jobs', config.REDIS_URL, {
+      redis: {
+        // Don't throw fatal MaxRetriesPerRequestError when Redis is briefly unreachable.
+        maxRetriesPerRequest: null,
+        enableOfflineQueue: false,
+        retryStrategy(times: number) {
+          if (times > 10) {
+            console.warn('[JobScheduler] Bull Redis retry limit reached');
+            return null;
+          }
+          return Math.min(times * 1000, 30000);
+        },
+      },
       defaultJobOptions: {
         removeOnComplete: 100,
         removeOnFail: 50,
@@ -50,6 +62,11 @@ function getQueue(): Bull.Queue<JobPayload> {
           delay: 60000, // 1 minute initial delay
         },
       },
+    });
+
+    // Bull queue error handler — log but never crash.
+    intelligenceQueue.on('error', (err) => {
+      console.warn('[JobScheduler] Queue error:', err.message);
     });
 
     // Register job processors

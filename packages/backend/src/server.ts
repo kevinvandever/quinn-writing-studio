@@ -103,6 +103,20 @@ app.use(notFoundHandler);
 // Global error handler (must be the very last middleware)
 app.use(errorHandler);
 
+// Process-level safety net: log unhandled errors instead of crashing the process.
+// This prevents Redis/Bull connection failures (or any other async error) from
+// taking down the entire site. Express requests will still get proper error
+// responses via the errorHandler middleware above.
+process.on('unhandledRejection', (reason) => {
+  console.error('[Process] Unhandled promise rejection:', reason instanceof Error ? reason.message : reason);
+});
+
+process.on('uncaughtException', (err) => {
+  console.error('[Process] Uncaught exception:', err.message);
+  console.error(err.stack);
+  // Don't exit — let the app keep serving requests.
+});
+
 // Start server
 app.listen(config.PORT, () => {
   console.log(

@@ -9,30 +9,45 @@ import { config } from '../config.js';
  * null if Redis is unavailable (falls back to in-memory).
  */
 let redisClient: Redis | null = null;
+let redisDisabled = false;
 
 function getRedisClient(): Redis | null {
+  if (redisDisabled) return null;
   if (redisClient) return redisClient;
 
   try {
     redisClient = new Redis(config.REDIS_URL, {
-      maxRetriesPerRequest: 3,
+      maxRetriesPerRequest: null, // never throw MaxRetriesPerRequestError
+      enableOfflineQueue: false,  // fail commands immediately if not connected
+      connectTimeout: 5000,
       retryStrategy(times) {
-        if (times > 5) return null; // stop retrying after 5 attempts
-        return Math.min(times * 200, 2000);
+        // Stop retrying after 10 attempts; backoff up to 30s between attempts.
+        if (times > 10) {
+          console.warn('[RateLimit] Redis retry limit reached, disabling Redis-backed rate limiting.');
+          redisDisabled = true;
+          return null;
+        }
+        return Math.min(times * 1000, 30000);
       },
     });
 
     redisClient.on('ready', () => {
       console.log('[RateLimit] Redis connected');
+      redisDisabled = false;
     });
 
     redisClient.on('error', (err) => {
       console.warn('[RateLimit] Redis error:', err.message);
     });
 
+    redisClient.on('end', () => {
+      console.warn('[RateLimit] Redis connection closed');
+    });
+
     return redisClient;
-  } catch {
-    console.warn('[RateLimit] Failed to create Redis client, using memory store');
+  } catch (err) {
+    console.warn('[RateLimit] Failed to create Redis client, using memory store:', err instanceof Error ? err.message : err);
+    redisDisabled = true;
     return null;
   }
 }

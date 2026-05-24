@@ -1,6 +1,5 @@
 import Bull from 'bull';
 import * as cron from 'node-cron';
-import Redis from 'ioredis';
 import { config } from '../config.js';
 import { query } from '../db/connection.js';
 import { runGrantScanner } from './grant-scanner.job.js';
@@ -111,37 +110,6 @@ function getQueue(): Bull.Queue<JobPayload> {
  */
 export async function startScheduler(): Promise<void> {
   console.log('[JobScheduler] Starting intelligence job scheduler...');
-
-  // Test Redis connectivity before setting up Bull queue
-  try {
-    const testClient = new Redis(config.REDIS_URL, {
-      maxRetriesPerRequest: 1,
-      connectTimeout: 5000,
-      retryStrategy(times: number) {
-        if (times > 2) return null;
-        return Math.min(times * 500, 2000);
-      },
-    });
-
-    await new Promise<void>((resolve, reject) => {
-      testClient.on('ready', () => {
-        testClient.disconnect();
-        resolve();
-      });
-      testClient.on('error', (err: Error) => {
-        testClient.disconnect();
-        reject(err);
-      });
-      setTimeout(() => {
-        testClient.disconnect();
-        reject(new Error('Redis connection timeout'));
-      }, 5000);
-    });
-  } catch (err) {
-    const message = err instanceof Error ? err.message : 'Unknown error';
-    console.warn(`[JobScheduler] Redis unavailable (${message}). Background jobs disabled.`);
-    return;
-  }
 
   const schedules = await loadSchedules();
   const userId = await getDefaultUserId();

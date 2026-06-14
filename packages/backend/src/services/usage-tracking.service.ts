@@ -5,8 +5,8 @@ import type { ModelSelection } from './claude-api.service.js';
 
 /**
  * Configurable pricing rates per 1M tokens.
- * Sonnet: $3 input / $15 output per 1M tokens
- * Opus: $15 input / $75 output per 1M tokens
+ * Sonnet 4.6: $3 input / $15 output per 1M tokens
+ * Opus 4.8: $5 input / $25 output per 1M tokens
  */
 interface ModelPricing {
   inputPer1M: number;
@@ -19,8 +19,8 @@ const PRICING: Record<ModelSelection, ModelPricing> = {
     outputPer1M: 15.0,
   },
   opus: {
-    inputPer1M: 15.0,
-    outputPer1M: 75.0,
+    inputPer1M: 5.0,
+    outputPer1M: 25.0,
   },
 };
 

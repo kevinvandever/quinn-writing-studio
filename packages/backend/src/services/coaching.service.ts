@@ -230,8 +230,9 @@ export async function sendSessionMessage(
   // Load session summaries for context
   const sessionSummaries = await loadSessionSummaries(session.project_id);
 
-  // Load corpus context (recent documents)
-  const corpusContext = await loadCorpusContext(session.project_id);
+  // Load corpus context — relevant documents based on the user's message,
+  // plus a baseline of documents for general awareness.
+  const corpusContext = await loadCorpusContext(session.project_id, content);
 
   // Check inactivity for context
   const inactivityDays = await checkInactivityGap(session.project_id);
@@ -596,20 +597,80 @@ async function loadModelRoutingPreference(userId: string): Promise<ModelRoutingP
 }
 
 /**
- * Load corpus context (document titles and content) for the project.
- * Loads up to 20 documents, with generous excerpts. The system prompt
- * budget calculation in assembleSystemPrompt will truncate if needed.
+ * Load corpus context for the project.
+ *
+ * Combines two strategies:
+ * 1. Relevance: documents whose title or content matches keywords in the
+ *    user's current message (so asking about a specific essay surfaces it).
+ * 2. Baseline: a set of documents ordered by binder position, so Quinn
+ *    always has general awareness of the project even for vague messages.
+ *
+ * Returns up to ~25 documents total, de-duplicated, relevant ones first.
  */
-async function loadCorpusContext(projectId: string): Promise<string[]> {
-  const result = await query<{ title: string; content: string }>(
-    `SELECT title, content FROM corpus_documents
+async function loadCorpusContext(projectId: string, userMessage?: string): Promise<string[]> {
+  const seen = new Set<string>();
+  const docs: Array<{ title: string; content: string }> = [];
+
+  // 1. Relevance-matched documents (if we have a message to match against)
+  if (userMessage && userMessage.trim().length > 0) {
+    // Build a tsquery from the message words (OR-joined, prefix-matched)
+    const keywords = userMessage
+      .toLowerCase()
+      .replace(/[^a-z0-9\s]/g, ' ')
+      .split(/\s+/)
+      .filter((w) => w.length > 3) // skip short/common words
+      .slice(0, 12);
+
+    if (keywords.length > 0) {
+      const tsquery = keywords.map((w) => `${w}:*`).join(' | ');
+      try {
+        const relevant = await query<{ id: string; title: string; content: string }>(
+          `SELECT id, title, content,
+                  ts_rank(
+                    to_tsvector('english', coalesce(title,'') || ' ' || coalesce(content,'')),
+                    to_tsquery('english', $2)
+                  ) AS rank
+           FROM corpus_documents
+           WHERE project_id = $1
+             AND is_folder = false
+             AND content != ''
+             AND to_tsvector('english', coalesce(title,'') || ' ' || coalesce(content,'')) @@ to_tsquery('english', $2)
+           ORDER BY rank DESC
+           LIMIT 10`,
+          [projectId, tsquery]
+        );
+
+        for (const row of relevant.rows) {
+          if (!seen.has(row.id)) {
+            seen.add(row.id);
+            docs.push({ title: row.title, content: row.content });
+          }
+        }
+      } catch (err) {
+        // Full-text query can fail on malformed input — fall through to baseline
+        console.warn('[Corpus] Relevance search failed, using baseline only:', err instanceof Error ? err.message : err);
+      }
+    }
+  }
+
+  // 2. Baseline documents by binder order (stable, predictable)
+  const baseline = await query<{ id: string; title: string; content: string }>(
+    `SELECT id, title, content FROM corpus_documents
      WHERE project_id = $1 AND is_folder = false AND content != ''
-     ORDER BY updated_at DESC
-     LIMIT 20`,
+     ORDER BY sort_order ASC
+     LIMIT 25`,
     [projectId]
   );
 
-  return result.rows.map((doc) => {
+  for (const row of baseline.rows) {
+    if (docs.length >= 25) break;
+    if (!seen.has(row.id)) {
+      seen.add(row.id);
+      docs.push({ title: row.title, content: row.content });
+    }
+  }
+
+  return docs.map((doc) => {
     const excerpt = doc.content.length > 3000
       ? doc.content.slice(0, 3000) + '...'
       : doc.content;

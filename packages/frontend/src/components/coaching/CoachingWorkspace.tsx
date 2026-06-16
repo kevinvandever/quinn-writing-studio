@@ -52,6 +52,7 @@ export function CoachingWorkspace() {
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [sessionContext, setSessionContext] = useState<SessionContext | null>(null);
+  const [isEndingSession, setIsEndingSession] = useState(false);
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -207,8 +208,10 @@ export function CoachingWorkspace() {
 
   // End session handler
   const handleEndSession = async () => {
-    if (!session) return;
+    if (!session || isEndingSession) return;
 
+    setIsEndingSession(true);
+    setError(null);
     try {
       const result = await post<{ summary: string; next_steps: string }>(
         `/api/sessions/${session.id}/end`
@@ -219,6 +222,8 @@ export function CoachingWorkspace() {
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Failed to end session';
       setError(message);
+    } finally {
+      setIsEndingSession(false);
     }
   };
 
@@ -267,10 +272,11 @@ export function CoachingWorkspace() {
           {session && !session.ended_at && (
             <button
               onClick={handleEndSession}
-              className="px-4 py-2 text-sm font-medium text-warm-700 bg-warm-200 rounded-lg hover:bg-warm-300 hover:text-ink transition-colors border border-warm-300"
+              disabled={isEndingSession}
+              className="px-4 py-2 text-sm font-medium text-warm-700 bg-warm-200 rounded-lg hover:bg-warm-300 hover:text-ink transition-colors border border-warm-300 disabled:opacity-60 disabled:cursor-not-allowed"
               title="End this session and save Quinn's notes"
             >
-              End Session
+              {isEndingSession ? 'Saving notes...' : 'End Session'}
             </button>
           )}
         </div>

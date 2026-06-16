@@ -537,34 +537,51 @@ export async function endSession(
     .join('\n\n');
 
   // Generate summary via Claude (non-streaming)
-  const summaryResponse = await sendMessage({
-    systemPrompt: `You are Quinn's memory. Given a coaching session transcript, produce two things:
+  // Generate summary via Claude (non-streaming). If this fails (e.g. Anthropic
+  // overloaded), we still end the session with a fallback so the action never
+  // silently breaks.
+  let summary = '';
+  let nextSteps = '';
+  let summaryModel: ModelSelection | null = null;
+  let summaryInputTokens = 0;
+  let summaryOutputTokens = 0;
+
+  try {
+    const summaryResponse = await sendMessage({
+      systemPrompt: `You are Quinn's memory. Given a coaching session transcript, produce two things:
 
 1. A rich summary (3-5 sentences) that captures: what was discussed, any emotional undertones or breakthroughs, specific essays or pieces referenced by name, decisions made, fears or doubts surfaced, and any creative insights that emerged. Write as if you are recording memories you'll need to recall next time you see this writer — not a corporate meeting summary.
 
 2. Concrete next steps or open threads that should be picked up next session.
 
 Format your response as JSON: {"summary": "...", "next_steps": "..."}`,
-    messages: [
-      {
-        role: 'user',
-        content: `Please summarize this coaching session:\n\n${transcript}`,
-      },
-    ],
-    model: 'sonnet' as ModelSelection,
-  });
+      messages: [
+        {
+          role: 'user',
+          content: `Please summarize this coaching session:\n\n${transcript}`,
+        },
+      ],
+      model: 'sonnet' as ModelSelection,
+    });
 
-  // Parse the summary response
-  let summary = '';
-  let nextSteps = '';
+    summaryModel = summaryResponse.model;
+    summaryInputTokens = summaryResponse.inputTokens;
+    summaryOutputTokens = summaryResponse.outputTokens;
 
-  try {
-    const parsed = JSON.parse(extractJSON(summaryResponse.content));
-    summary = parsed.summary || '';
-    nextSteps = parsed.next_steps || '';
-  } catch {
-    // If JSON parsing fails, use the raw content as summary
-    summary = summaryResponse.content;
+    try {
+      const parsed = JSON.parse(extractJSON(summaryResponse.content));
+      summary = parsed.summary || '';
+      nextSteps = parsed.next_steps || '';
+    } catch {
+      // If JSON parsing fails, use the raw content as summary
+      summary = summaryResponse.content;
+      nextSteps = '';
+    }
+  } catch (err) {
+    // Claude call failed — end the session anyway with a minimal fallback summary
+    console.warn('[Coaching] Summary generation failed, ending session with fallback:', err instanceof Error ? err.message : err);
+    const messageCount = messagesResult.rows.filter((m) => m.role === 'user' || m.role === 'assistant').length;
+    summary = `Session on ${new Date().toLocaleDateString()} with ${messageCount} messages exchanged. (Summary could not be generated automatically.)`;
     nextSteps = '';
   }
 
@@ -576,14 +593,16 @@ Format your response as JSON: {"summary": "...", "next_steps": "..."}`,
     [summary, nextSteps, sessionId]
   );
 
-  // Log API usage for summary generation
-  await logApiUsage(
-    userId,
-    summaryResponse.model,
-    'coaching',
-    summaryResponse.inputTokens,
-    summaryResponse.outputTokens
-  );
+  // Log API usage for summary generation (only if the call succeeded)
+  if (summaryModel) {
+    await logApiUsage(
+      userId,
+      summaryModel,
+      'coaching',
+      summaryInputTokens,
+      summaryOutputTokens
+    );
+  }
 
   // Log activity event
   await query(

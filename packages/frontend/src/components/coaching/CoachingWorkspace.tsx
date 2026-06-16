@@ -210,8 +210,8 @@ export function CoachingWorkspace() {
     return (
       <div className="flex items-center justify-center h-full min-h-[400px]">
         <div className="text-center">
-          <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-indigo-600 mx-auto mb-4" />
-          <p className="text-gray-600">Starting coaching session...</p>
+          <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-sage-600 mx-auto mb-4" />
+          <p className="text-ink-muted font-serif italic">Starting coaching session...</p>
         </div>
       </div>
     );
@@ -221,10 +221,10 @@ export function CoachingWorkspace() {
     return (
       <div className="flex items-center justify-center h-full min-h-[400px]">
         <div className="text-center">
-          <p className="text-red-600 mb-4">{error}</p>
+          <p className="text-red-700 mb-4">{error}</p>
           <button
             onClick={() => window.location.reload()}
-            className="px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700"
+            className="px-4 py-2 bg-sage-600 text-white rounded-lg hover:bg-sage-700 transition-colors"
           >
             Retry
           </button>
@@ -236,20 +236,21 @@ export function CoachingWorkspace() {
   return (
     <div className="flex flex-col h-full max-h-[calc(100vh-4rem)]">
       {/* Header */}
-      <div className="flex items-center justify-between px-4 py-3 border-b border-gray-200 bg-white">
+      <div className="flex items-center justify-between px-5 py-4 border-b border-warm-200 bg-warm-50">
         <div>
-          <h2 className="text-lg font-semibold text-gray-900">
+          <h2 className="font-serif text-xl font-semibold text-ink">
             Coaching Session
           </h2>
           {sessionContext?.project && (
-            <p className="text-sm text-gray-500">{sessionContext.project.name}</p>
+            <p className="text-sm text-ink-muted mt-0.5">{sessionContext.project.name}</p>
           )}
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-3">
           {session && !session.ended_at && (
             <button
               onClick={handleEndSession}
-              className="px-3 py-1.5 text-sm text-gray-700 bg-gray-100 rounded-lg hover:bg-gray-200 transition-colors"
+              className="px-4 py-2 text-sm font-medium text-warm-700 bg-warm-200 rounded-lg hover:bg-warm-300 hover:text-ink transition-colors border border-warm-300"
+              title="End this session and save Quinn's notes"
             >
               End Session
             </button>
@@ -259,15 +260,15 @@ export function CoachingWorkspace() {
 
       {/* Stale corpus / inactivity notices */}
       {sessionContext?.staleCorpus && (
-        <div className="px-4 py-2 bg-amber-50 border-b border-amber-200">
+        <div className="px-5 py-2.5 bg-amber-50 border-b border-amber-200">
           <p className="text-sm text-amber-800">
             📝 Your corpus hasn&apos;t been updated in a while. Consider re-importing your latest Scrivener project.
           </p>
         </div>
       )}
       {sessionContext?.inactivityDays && sessionContext.inactivityDays > 7 && (
-        <div className="px-4 py-2 bg-blue-50 border-b border-blue-200">
-          <p className="text-sm text-blue-800">
+        <div className="px-5 py-2.5 bg-sage-50 border-b border-sage-200">
+          <p className="text-sm text-sage-800">
             👋 Welcome back! It&apos;s been {sessionContext.inactivityDays} days since your last session.
           </p>
         </div>
@@ -275,26 +276,26 @@ export function CoachingWorkspace() {
 
       {/* Session ended notice */}
       {session?.ended_at && (
-        <div className="px-4 py-3 bg-gray-50 border-b border-gray-200">
-          <p className="text-sm font-medium text-gray-700">Session ended</p>
+        <div className="px-5 py-4 bg-warm-100 border-b border-warm-200">
+          <p className="font-serif text-sm font-medium text-ink mb-1">Session complete</p>
           {session.summary && (
-            <p className="text-sm text-gray-600 mt-1">{session.summary}</p>
+            <p className="text-sm text-ink-muted leading-relaxed">{session.summary}</p>
           )}
           {session.next_steps && (
-            <p className="text-sm text-gray-500 mt-1">
-              <span className="font-medium">Next steps:</span> {session.next_steps}
+            <p className="text-sm text-ink-muted mt-2">
+              <span className="font-medium text-ink">Next time:</span> {session.next_steps}
             </p>
           )}
         </div>
       )}
 
       {/* Messages area */}
-      <div className="flex-1 overflow-y-auto px-4 py-4 space-y-4">
+      <div className="flex-1 overflow-y-auto px-5 py-6 space-y-6">
         {messages.length === 0 && !isStreaming && (
-          <div className="text-center text-gray-500 mt-8">
-            <p className="text-lg mb-2">🖋️</p>
-            <p>Start your coaching session by sending a message.</p>
-            <p className="text-sm mt-1">Quinn is ready to help with your writing.</p>
+          <div className="text-center text-ink-muted mt-12">
+            <p className="text-3xl mb-3">🖋️</p>
+            <p className="font-serif text-lg text-ink">What are we working on today?</p>
+            <p className="text-sm mt-2 text-warm-500">Quinn is ready when you are.</p>
           </div>
         )}
 
@@ -322,14 +323,14 @@ export function CoachingWorkspace() {
         {/* Loading indicator while waiting for first token */}
         {isStreaming && !streamingContent && (
           <div className="flex items-start gap-3">
-            <div className="w-8 h-8 rounded-full bg-indigo-100 flex items-center justify-center flex-shrink-0">
+            <div className="w-9 h-9 rounded-full bg-sage-100 flex items-center justify-center flex-shrink-0">
               <span className="text-sm">🖋️</span>
             </div>
-            <div className="bg-gray-100 rounded-2xl rounded-tl-sm px-4 py-3">
-              <div className="flex items-center gap-1">
-                <div className="w-2 h-2 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
-                <div className="w-2 h-2 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '150ms' }} />
-                <div className="w-2 h-2 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '300ms' }} />
+            <div className="bg-warm-100 rounded-2xl rounded-tl-sm px-5 py-3">
+              <div className="flex items-center gap-1.5">
+                <div className="w-2 h-2 bg-sage-400 rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
+                <div className="w-2 h-2 bg-sage-400 rounded-full animate-bounce" style={{ animationDelay: '150ms' }} />
+                <div className="w-2 h-2 bg-sage-400 rounded-full animate-bounce" style={{ animationDelay: '300ms' }} />
               </div>
             </div>
           </div>
@@ -340,18 +341,18 @@ export function CoachingWorkspace() {
 
       {/* Input area */}
       {session && !session.ended_at && (
-        <div className="border-t border-gray-200 bg-white px-4 py-3">
+        <div className="border-t border-warm-200 bg-warm-50 px-5 py-4">
           {error && (
-            <p className="text-sm text-red-600 mb-2">{error}</p>
+            <p className="text-sm text-red-700 mb-2">{error}</p>
           )}
-          <div className="flex items-end gap-2">
+          <div className="flex items-end gap-3">
             <textarea
               ref={textareaRef}
               value={inputValue}
               onChange={(e) => setInputValue(e.target.value)}
               onKeyDown={handleKeyDown}
-              placeholder="Type your message... (Enter to send, Shift+Enter for new line)"
-              className="flex-1 resize-none rounded-xl border border-gray-300 px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent min-h-[44px] max-h-[200px]"
+              placeholder="What's on your mind..."
+              className="flex-1 resize-none rounded-xl border border-warm-300 bg-white px-4 py-3 text-coaching text-ink placeholder:text-warm-400 focus:outline-none focus:ring-2 focus:ring-sage-400 focus:border-transparent min-h-[48px] max-h-[200px] transition-shadow"
               rows={1}
               disabled={isStreaming}
               aria-label="Message input"
@@ -359,7 +360,7 @@ export function CoachingWorkspace() {
             <button
               onClick={handleSendMessage}
               disabled={!inputValue.trim() || isStreaming}
-              className="px-4 py-3 bg-indigo-600 text-white rounded-xl hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+              className="px-4 py-3 bg-sage-600 text-white rounded-xl hover:bg-sage-700 disabled:opacity-40 disabled:cursor-not-allowed transition-colors shadow-sm"
               aria-label="Send message"
             >
               <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">

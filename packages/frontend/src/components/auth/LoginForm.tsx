@@ -44,11 +44,11 @@ export function LoginForm() {
   }
 
   return (
-    <div className="min-h-screen flex items-center justify-center bg-gray-50 px-4">
+    <div className="min-h-screen flex items-center justify-center bg-cream px-4">
       <div className="max-w-md w-full space-y-8">
         <div className="text-center">
-          <h1 className="text-3xl font-bold text-gray-900">🖋️ Quinn Writing Studio</h1>
-          <p className="mt-2 text-gray-600">
+          <h1 className="font-serif text-3xl font-bold text-ink">🖋️ Quinn Writing Studio</h1>
+          <p className="mt-2 text-ink-muted">
             {isRegister ? 'Create your account' : 'Sign in to your writing studio'}
           </p>
         </div>
@@ -56,7 +56,7 @@ export function LoginForm() {
         <form className="mt-8 space-y-6" onSubmit={handleSubmit}>
           {error && (
             <div
-              className="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-md text-sm"
+              className="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-lg text-sm"
               role="alert"
             >
               {error}
@@ -66,7 +66,7 @@ export function LoginForm() {
           <div className="space-y-4">
             {isRegister && (
               <div>
-                <label htmlFor="displayName" className="block text-sm font-medium text-gray-700">
+                <label htmlFor="displayName" className="block text-sm font-medium text-ink">
                   Display name
                 </label>
                 <input
@@ -77,14 +77,14 @@ export function LoginForm() {
                   required
                   value={displayName}
                   onChange={(e) => setDisplayName(e.target.value)}
-                  className="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm"
+                  className="mt-1 block w-full px-3 py-2 border border-warm-300 rounded-lg shadow-sm placeholder-warm-400 focus:outline-none focus:ring-2 focus:ring-sage-400 focus:border-transparent sm:text-sm"
                   placeholder="Kevin"
                 />
               </div>
             )}
 
             <div>
-              <label htmlFor="email" className="block text-sm font-medium text-gray-700">
+              <label htmlFor="email" className="block text-sm font-medium text-ink">
                 Email address
               </label>
               <input
@@ -95,13 +95,13 @@ export function LoginForm() {
                 required
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
-                className="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm"
+                className="mt-1 block w-full px-3 py-2 border border-warm-300 rounded-lg shadow-sm placeholder-warm-400 focus:outline-none focus:ring-2 focus:ring-sage-400 focus:border-transparent sm:text-sm"
                 placeholder="you@example.com"
               />
             </div>
 
             <div>
-              <label htmlFor="password" className="block text-sm font-medium text-gray-700">
+              <label htmlFor="password" className="block text-sm font-medium text-ink">
                 Password
               </label>
               <input
@@ -113,7 +113,7 @@ export function LoginForm() {
                 minLength={isRegister ? 8 : undefined}
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
-                className="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm"
+                className="mt-1 block w-full px-3 py-2 border border-warm-300 rounded-lg shadow-sm placeholder-warm-400 focus:outline-none focus:ring-2 focus:ring-sage-400 focus:border-transparent sm:text-sm"
                 placeholder={isRegister ? 'At least 8 characters' : '••••••••'}
               />
             </div>
@@ -122,7 +122,7 @@ export function LoginForm() {
           <button
             type="submit"
             disabled={isSubmitting}
-            className="w-full flex justify-center py-2 px-4 border border-transparent rounded-md shadow-sm text-sm font-medium text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed"
+            className="w-full flex justify-center py-2.5 px-4 border border-transparent rounded-lg shadow-sm text-sm font-medium text-white bg-sage-600 hover:bg-sage-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-sage-500 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
           >
             {isSubmitting
               ? (isRegister ? 'Creating account...' : 'Signing in...')
@@ -133,7 +133,7 @@ export function LoginForm() {
             <button
               type="button"
               onClick={toggleMode}
-              className="text-sm text-indigo-600 hover:text-indigo-500"
+              className="text-sm text-sage-600 hover:text-sage-700"
             >
               {isRegister
                 ? 'Already have an account? Sign in'

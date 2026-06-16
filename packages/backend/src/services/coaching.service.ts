@@ -27,6 +27,7 @@ export interface SessionContext {
   staleCorpus: boolean;
   inactivityDays: number | null;
   sessionSummaries: SessionSummary[];
+  openingMessage: string | null;
 }
 
 export type SessionType = 'coaching' | 'editorial_review' | 'theme_analysis' | 'promptly_coaching';
@@ -111,6 +112,24 @@ export async function startSession(
     [userId, projectId, JSON.stringify({ session_id: session.id, session_type: sessionType })]
   );
 
+  // Generate a proactive opening message from Quinn (coaching sessions only).
+  // She greets the writer with what she noticed changed and where they left off.
+  let openingMessage: string | null = null;
+  if (sessionType === 'coaching') {
+    openingMessage = await generateSessionOpener(
+      userId,
+      session.id,
+      projectId,
+      {
+        name: project.name,
+        centralQuestion: project.central_question,
+        description: project.description,
+      },
+      sessionSummaries,
+      inactivityDays
+    );
+  }
+
   return {
     sessionId: session.id,
     projectId,
@@ -123,7 +142,111 @@ export async function startSession(
     staleCorpus,
     inactivityDays,
     sessionSummaries,
+    openingMessage,
   };
+}
+
+/**
+ * Generate a proactive opening message from Quinn when a coaching session
+ * starts. She references what changed in the manuscript since last time and
+ * where the previous session left off, then invites the writer in.
+ *
+ * Returns null (no opener) for a brand-new project with no history or changes,
+ * so Quinn doesn't fabricate a greeting out of nothing.
+ */
+async function generateSessionOpener(
+  userId: string,
+  sessionId: string,
+  projectId: string,
+  project: ProjectContext,
+  sessionSummaries: SessionSummary[],
+  inactivityDays: number | null
+): Promise<string | null> {
+  const corpusChanges = await loadCorpusChangesSinceLastSession(projectId);
+  const hasHistory = sessionSummaries.length > 0;
+
+  // Nothing to open with — let the writer start.
+  if (!corpusChanges && !hasHistory) {
+    return null;
+  }
+
+  const personaConfig = await loadPersonaConfig(userId);
+
+  // Build a focused prompt for the opener
+  const contextParts: string[] = [];
+  if (corpusChanges) {
+    contextParts.push(corpusChanges);
+  }
+  if (hasHistory) {
+    const last = sessionSummaries[0]!;
+    if (last.summary) contextParts.push(`Last session: ${last.summary}`);
+    if (last.nextSteps) contextParts.push(`What was next: ${last.nextSteps}`);
+  }
+  if (inactivityDays !== null && inactivityDays > 0) {
+    contextParts.push(`It has been ${inactivityDays} day${inactivityDays > 1 ? 's' : ''} since the last session.`);
+  }
+
+  const openerSystemPrompt = `${buildOpenerPersonaIntro(personaConfig)}
+
+You are starting a new coaching session with the writer on their project "${project.name}". Before they say anything, you greet them — warmly, briefly, in your voice.
+
+Use what you know (below) to open the conversation: acknowledge what changed in their manuscript since last time, reference where you left off, and ask ONE inviting question about where they'd like to begin. Keep it to 2-4 sentences. Do not list everything mechanically — pick what's most interesting to ask about. Do not use a sign-off or farewell. This is a greeting, not a closing.
+
+What you know:
+${contextParts.join('\n\n')}`;
+
+  try {
+    const response = await sendMessage({
+      systemPrompt: openerSystemPrompt,
+      messages: [
+        {
+          role: 'user',
+          content: 'Begin the session by greeting me with what you noticed.',
+        },
+      ],
+      model: 'sonnet' as ModelSelection,
+    });
+
+    const opener = response.content.trim();
+    if (!opener) return null;
+
+    // Persist the opener as Quinn's first message in the session
+    await query(
+      `INSERT INTO messages (session_id, role, content, model_used, model_reason, token_count_input, token_count_output)
+       VALUES ($1, 'assistant', $2, $3, $4, $5, $6)`,
+      [
+        sessionId,
+        opener,
+        response.model,
+        'Session opener',
+        response.inputTokens,
+        response.outputTokens,
+      ]
+    );
+
+    await logApiUsage(userId, response.model, 'coaching', response.inputTokens, response.outputTokens);
+
+    return opener;
+  } catch (err) {
+    // If opener generation fails, just start without one — not worth blocking the session
+    console.warn('[Coaching] Failed to generate session opener:', err instanceof Error ? err.message : err);
+    return null;
+  }
+}
+
+/**
+ * Build a compact persona intro for the opener prompt — name, role, voice.
+ */
+function buildOpenerPersonaIntro(personaConfig: Record<string, unknown>): string {
+  const name = (personaConfig['name'] as string) || 'Quinn';
+  const identity = personaConfig['identity'] as Record<string, unknown> | undefined;
+  const voice = personaConfig['voice'] as Record<string, unknown> | undefined;
+  const role = identity?.['role'] as string | undefined;
+  const tone = voice?.['tone'] as string | undefined;
+
+  const parts = [`You are ${name}${role ? `, ${role}` : ''}.`];
+  if (tone) parts.push(`Your voice: ${tone}.`);
+  return parts.join(' ');
 }
 
 // ─── Send Message ────────────────────────────────────────────────────────────

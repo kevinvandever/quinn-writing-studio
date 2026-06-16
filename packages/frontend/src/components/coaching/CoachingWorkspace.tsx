@@ -36,6 +36,7 @@ interface SessionContext {
   };
   staleCorpus: boolean;
   inactivityDays: number | null;
+  openingMessage: string | null;
 }
 
 // ─── Component ───────────────────────────────────────────────────────────────
@@ -105,7 +106,21 @@ export function CoachingWorkspace() {
             started_at: new Date().toISOString(),
             ended_at: null,
           });
-          setMessages([]);
+          // If Quinn generated a proactive opening message, show it
+          if (newSession.session.openingMessage) {
+            setMessages([
+              {
+                id: `opener-${Date.now()}`,
+                role: 'assistant',
+                content: newSession.session.openingMessage,
+                model_used: null,
+                model_reason: null,
+                created_at: new Date().toISOString(),
+              },
+            ]);
+          } else {
+            setMessages([]);
+          }
         }
       } catch (err) {
         const message = err instanceof Error ? err.message : 'Failed to initialize session';

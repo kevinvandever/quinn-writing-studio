@@ -570,20 +570,22 @@ async function loadModelRoutingPreference(userId: string): Promise<ModelRoutingP
 }
 
 /**
- * Load corpus context (recent document titles/excerpts) for the project.
+ * Load corpus context (document titles and content) for the project.
+ * Loads up to 20 documents, with generous excerpts. The system prompt
+ * budget calculation in assembleSystemPrompt will truncate if needed.
  */
 async function loadCorpusContext(projectId: string): Promise<string[]> {
   const result = await query<{ title: string; content: string }>(
     `SELECT title, content FROM corpus_documents
-     WHERE project_id = $1 AND is_folder = false
+     WHERE project_id = $1 AND is_folder = false AND content != ''
      ORDER BY updated_at DESC
-     LIMIT 5`,
+     LIMIT 20`,
     [projectId]
   );
 
   return result.rows.map((doc) => {
-    const excerpt = doc.content.length > 500
-      ? doc.content.slice(0, 500) + '...'
+    const excerpt = doc.content.length > 3000
+      ? doc.content.slice(0, 3000) + '...'
       : doc.content;
     return `### ${doc.title}\n${excerpt}`;
   });

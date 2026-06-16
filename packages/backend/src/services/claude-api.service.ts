@@ -337,8 +337,8 @@ export function determineModel(
 
 /** Token budget per model (approximate characters, ~4 chars per token) */
 const TOKEN_BUDGET: Record<ModelSelection, number> = {
-  sonnet: 8000 * 4, // 8k tokens ≈ 32k chars
-  opus: 16000 * 4, // 16k tokens ≈ 64k chars
+  sonnet: 32000 * 4, // 32k tokens ≈ 128k chars
+  opus: 64000 * 4, // 64k tokens ≈ 256k chars
 };
 
 export interface ProjectContext {

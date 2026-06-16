@@ -381,9 +381,11 @@ export async function endSession(
 
   // Generate summary via Claude (non-streaming)
   const summaryResponse = await sendMessage({
-    systemPrompt: `You are a session summarizer. Given a coaching session transcript, produce:
-1. A concise summary (2-3 sentences) of what was discussed and any breakthroughs or decisions made.
-2. A list of next steps that were identified during the session.
+    systemPrompt: `You are Quinn's memory. Given a coaching session transcript, produce two things:
+
+1. A rich summary (3-5 sentences) that captures: what was discussed, any emotional undertones or breakthroughs, specific essays or pieces referenced by name, decisions made, fears or doubts surfaced, and any creative insights that emerged. Write as if you are recording memories you'll need to recall next time you see this writer — not a corporate meeting summary.
+
+2. Concrete next steps or open threads that should be picked up next session.
 
 Format your response as JSON: {"summary": "...", "next_steps": "..."}`,
     messages: [

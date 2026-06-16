@@ -401,6 +401,21 @@ export function assembleSystemPrompt(options: AssemblePromptOptions): string {
   const budget = TOKEN_BUDGET[model];
   const sections: string[] = [];
 
+  // 0. Current date/time context
+  const now = new Date();
+  const dateStr = now.toLocaleDateString('en-US', {
+    weekday: 'long',
+    year: 'numeric',
+    month: 'long',
+    day: 'numeric',
+  });
+  const timeStr = now.toLocaleTimeString('en-US', {
+    hour: 'numeric',
+    minute: '2-digit',
+    hour12: true,
+  });
+  sections.push(`## Current Date and Time\n${dateStr}, ${timeStr}\n\nUse this naturally in conversation when relevant — acknowledge gaps between sessions, reference time of day, etc.`);
+
   // 1. Persona configuration
   const personaSection = buildPersonaSection(personaConfig);
   sections.push(personaSection);
@@ -542,7 +557,7 @@ function buildPersonaSection(personaConfig: Record<string, unknown>): string {
   if (identity) {
     const signature = identity['partnership_signature'] as string | undefined;
     if (signature) {
-      lines.push(`\nClose responses with: ${signature}`);
+      lines.push(`\nSession sign-off: "${signature}" — use this ONLY as a farewell when the writer is clearly ending their session or saying goodbye. Never after individual responses mid-conversation.`);
     }
   }
 
@@ -565,15 +580,24 @@ function buildProjectSection(project: ProjectContext): string {
 }
 
 function buildSessionHistorySection(sessions: SessionSummary[]): string {
-  const lines: string[] = ['## Recent Session History'];
+  const lines: string[] = ['## Session Memory'];
+  lines.push(
+    'These are your memories of previous sessions with this writer. You remember these conversations. When starting a new session, naturally acknowledge where you left off — reference specific topics, decisions, or unresolved threads. Do not recite the summaries verbatim; weave them into conversation as a coach who remembers would.'
+  );
+
   for (const session of sessions.slice(0, 3)) {
-    const date = session.startedAt.toLocaleDateString();
-    lines.push(`\n### Session (${date})`);
+    const date = session.startedAt.toLocaleDateString('en-US', {
+      weekday: 'long',
+      year: 'numeric',
+      month: 'long',
+      day: 'numeric',
+    });
+    lines.push(`\n### Session — ${date}`);
     if (session.summary) {
-      lines.push(`Summary: ${session.summary}`);
+      lines.push(`What happened: ${session.summary}`);
     }
     if (session.nextSteps) {
-      lines.push(`Next steps: ${session.nextSteps}`);
+      lines.push(`What was next: ${session.nextSteps}`);
     }
   }
   return lines.join('\n');

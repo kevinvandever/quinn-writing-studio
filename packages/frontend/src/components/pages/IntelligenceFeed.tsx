@@ -76,22 +76,22 @@ export function IntelligenceFeed() {
   return (
     <div className="space-y-6">
       <div>
-        <h2 className="text-2xl font-bold text-gray-900">Intelligence Feed</h2>
-        <p className="text-gray-600 text-sm mt-1">
+        <h2 className="font-serif text-2xl font-semibold text-ink">Intelligence Feed</h2>
+        <p className="text-ink-muted text-sm mt-1">
           Grants, AI news, and publishing opportunities discovered by Quinn's background scanners
         </p>
       </div>
 
       {/* Tabs */}
-      <div className="flex gap-1 border-b border-gray-200">
+      <div className="flex gap-1 border-b border-warm-200">
         {tabs.map((tab) => (
           <button
             key={tab.key}
             onClick={() => { setActiveTab(tab.key); setStatusFilter(''); }}
             className={`px-4 py-2.5 text-sm font-medium border-b-2 transition-colors ${
               activeTab === tab.key
-                ? 'border-indigo-600 text-indigo-600'
-                : 'border-transparent text-gray-500 hover:text-gray-700'
+                ? 'border-sage-600 text-sage-700'
+                : 'border-transparent text-ink-muted hover:text-ink'
             }`}
           >
             <span className="mr-1.5">{tab.icon}</span>
@@ -102,12 +102,12 @@ export function IntelligenceFeed() {
 
       {/* Filter */}
       <div className="flex items-center gap-3">
-        <label htmlFor="status-filter" className="text-sm text-gray-600">Filter:</label>
+        <label htmlFor="status-filter" className="text-sm text-ink-muted">Filter:</label>
         <select
           id="status-filter"
           value={statusFilter}
           onChange={(e) => setStatusFilter(e.target.value)}
-          className="rounded-md border border-gray-300 px-3 py-1.5 text-sm"
+          className="rounded-lg border border-warm-300 bg-white px-3 py-1.5 text-sm text-ink focus:outline-none focus:ring-2 focus:ring-sage-400 focus:border-transparent"
         >
           <option value="">All</option>
           <option value="new">New</option>
@@ -116,7 +116,7 @@ export function IntelligenceFeed() {
           <option value="saved">Saved</option>
           <option value="dismissed">Dismissed</option>
         </select>
-        <span className="text-sm text-gray-400">{total} items</span>
+        <span className="text-sm text-warm-400">{total} items</span>
       </div>
 
       {/* Error */}
@@ -129,15 +129,15 @@ export function IntelligenceFeed() {
       {/* Loading */}
       {loading && (
         <div className="flex items-center justify-center py-12">
-          <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-indigo-600" />
+          <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-sage-600" />
         </div>
       )}
 
       {/* Empty state */}
       {!loading && items.length === 0 && (
-        <div className="text-center py-12 bg-white rounded-lg border border-gray-200">
-          <p className="text-lg text-gray-600">No items yet</p>
-          <p className="text-sm text-gray-500 mt-2">
+        <div className="text-center py-12 bg-warm-50 rounded-xl border border-warm-200">
+          <p className="font-serif text-lg text-ink">No items yet</p>
+          <p className="text-sm text-ink-muted mt-2 max-w-md mx-auto">
             Quinn's background scanners will populate this feed automatically based on your configured schedules.
             Check Settings → Intelligence Schedules to configure scan frequency.
           </p>
@@ -148,27 +148,27 @@ export function IntelligenceFeed() {
       {!loading && items.length > 0 && (
         <div className="space-y-3">
           {items.map((item) => (
-            <div key={item.id} className="bg-white rounded-lg border border-gray-200 p-4">
+            <div key={item.id} className="bg-warm-50 rounded-xl border border-warm-200 p-5 hover:border-warm-300 transition-colors">
               <div className="flex items-start justify-between gap-3">
                 <div className="flex-1 min-w-0">
-                  <div className="flex items-center gap-2 mb-1">
-                    <h3 className="font-medium text-gray-900 truncate">{item.title}</h3>
+                  <div className="flex items-center gap-2 mb-1.5">
+                    <h3 className="font-serif font-medium text-ink truncate">{item.title}</h3>
                     <span className={`text-xs px-2 py-0.5 rounded-full flex-shrink-0 ${
-                      item.status === 'new' ? 'bg-blue-100 text-blue-700' :
+                      item.status === 'new' ? 'bg-sage-100 text-sage-700' :
                       item.status === 'selected' ? 'bg-green-100 text-green-700' :
-                      item.status === 'saved' ? 'bg-amber-100 text-amber-700' :
-                      item.status === 'dismissed' ? 'bg-gray-100 text-gray-500' :
-                      'bg-gray-100 text-gray-600'
+                      item.status === 'saved' ? 'bg-amber-100 text-amber-800' :
+                      item.status === 'dismissed' ? 'bg-warm-200 text-warm-500' :
+                      'bg-warm-200 text-warm-600'
                     }`}>
                       {item.status}
                     </span>
                   </div>
 
                   {item.summary && (
-                    <p className="text-sm text-gray-600 mt-1 line-clamp-2">{item.summary}</p>
+                    <p className="text-sm text-ink-muted mt-1 line-clamp-2 leading-relaxed">{item.summary}</p>
                   )}
 
-                  <div className="flex items-center gap-3 mt-2 text-xs text-gray-500">
+                  <div className="flex items-center gap-3 mt-2.5 text-xs text-warm-500">
                     {item.source_name && <span>{item.source_name}</span>}
                     {item.deadline && (
                       <span className="text-red-600 font-medium">
@@ -182,7 +182,7 @@ export function IntelligenceFeed() {
                   </div>
 
                   {item.eligibility_summary && (
-                    <p className="text-xs text-gray-500 mt-2 italic">{item.eligibility_summary}</p>
+                    <p className="text-xs text-warm-500 mt-2 italic">{item.eligibility_summary}</p>
                   )}
                 </div>
 
@@ -191,19 +191,19 @@ export function IntelligenceFeed() {
                   <div className="flex flex-col gap-1 flex-shrink-0">
                     <button
                       onClick={() => updateStatus(item.id, 'selected')}
-                      className="text-xs px-2 py-1 bg-green-50 text-green-700 rounded hover:bg-green-100"
+                      className="text-xs px-2.5 py-1 bg-green-50 text-green-700 rounded-md hover:bg-green-100 transition-colors"
                     >
                       Select
                     </button>
                     <button
                       onClick={() => updateStatus(item.id, 'saved')}
-                      className="text-xs px-2 py-1 bg-amber-50 text-amber-700 rounded hover:bg-amber-100"
+                      className="text-xs px-2.5 py-1 bg-amber-50 text-amber-800 rounded-md hover:bg-amber-100 transition-colors"
                     >
                       Save
                     </button>
                     <button
                       onClick={() => updateStatus(item.id, 'dismissed')}
-                      className="text-xs px-2 py-1 bg-gray-50 text-gray-500 rounded hover:bg-gray-100"
+                      className="text-xs px-2.5 py-1 bg-warm-100 text-warm-500 rounded-md hover:bg-warm-200 transition-colors"
                     >
                       Dismiss
                     </button>
@@ -215,7 +215,7 @@ export function IntelligenceFeed() {
                     href={item.source}
                     target="_blank"
                     rel="noopener noreferrer"
-                    className="text-xs text-indigo-600 hover:text-indigo-700 flex-shrink-0"
+                    className="text-xs text-sage-600 hover:text-sage-700 flex-shrink-0 transition-colors"
                   >
                     Source ↗
                   </a>

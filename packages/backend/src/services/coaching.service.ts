@@ -260,6 +260,15 @@ export async function sendSessionMessage(
       : recentActivity;
   }
 
+  // Load corpus changes since the last coaching session — so Quinn knows
+  // exactly what the writer added, revised, or removed in Scrivener.
+  const corpusChanges = await loadCorpusChangesSinceLastSession(session.project_id);
+  if (corpusChanges) {
+    activityContext = activityContext
+      ? `${activityContext}\n\n${corpusChanges}`
+      : corpusChanges;
+  }
+
   // Determine task type for model routing
   const taskType: TaskType = session.session_type === 'editorial_review'
     ? 'editorial'
@@ -464,6 +473,97 @@ Format your response as JSON: {"summary": "...", "next_steps": "..."}`,
 }
 
 // ─── Helper Functions ────────────────────────────────────────────────────────
+
+/**
+ * Load a summary of corpus changes (added/modified/deleted documents)
+ * from Scrivener imports that occurred since the writer's last completed
+ * coaching session. This lets Quinn know exactly what changed in the
+ * writer's manuscript since they last talked.
+ */
+async function loadCorpusChangesSinceLastSession(projectId: string): Promise<string | null> {
+  // Find when the last completed session ended
+  const lastSession = await query<{ ended_at: Date }>(
+    `SELECT ended_at FROM sessions
+     WHERE project_id = $1 AND ended_at IS NOT NULL
+     ORDER BY ended_at DESC
+     LIMIT 1`,
+    [projectId]
+  );
+
+  const since = lastSession.rows[0]?.ended_at ?? null;
+
+  // Load imports since that time (or the most recent import if no prior session)
+  const imports = await query<{
+    diff_summary: {
+      added?: Array<{ title: string }>;
+      modified?: Array<{ title: string; oldWordCount: number; newWordCount: number }>;
+      deleted?: Array<{ title: string }>;
+    } | null;
+    imported_at: Date;
+  }>(
+    since
+      ? `SELECT diff_summary, imported_at FROM scrivener_imports
+         WHERE project_id = $1 AND imported_at > $2
+         ORDER BY imported_at ASC`
+      : `SELECT diff_summary, imported_at FROM scrivener_imports
+         WHERE project_id = $1
+         ORDER BY imported_at DESC
+         LIMIT 1`,
+    since ? [projectId, since] : [projectId]
+  );
+
+  if (imports.rows.length === 0) {
+    return null;
+  }
+
+  // Aggregate changes across all imports since last session
+  const added = new Set<string>();
+  const modified = new Map<string, { oldWordCount: number; newWordCount: number }>();
+  const deleted = new Set<string>();
+
+  for (const imp of imports.rows) {
+    const diff = imp.diff_summary;
+    if (!diff) continue;
+    for (const a of diff.added ?? []) added.add(a.title);
+    for (const m of diff.modified ?? []) {
+      modified.set(m.title, { oldWordCount: m.oldWordCount, newWordCount: m.newWordCount });
+    }
+    for (const d of diff.deleted ?? []) deleted.add(d.title);
+  }
+
+  // A title might be both added and modified across imports — added wins
+  for (const title of added) modified.delete(title);
+
+  if (added.size === 0 && modified.size === 0 && deleted.size === 0) {
+    return null;
+  }
+
+  const lines: string[] = [
+    since
+      ? "CHANGES TO THE MANUSCRIPT SINCE YOUR LAST SESSION: The writer has been working in Scrivener. Here's exactly what changed. Acknowledge this naturally — you noticed their work."
+      : "RECENT MANUSCRIPT CHANGES: Here's what changed in the writer's most recent Scrivener sync.",
+  ];
+
+  if (added.size > 0) {
+    lines.push(`\nNew pieces added:\n${[...added].map((t) => `- ${t}`).join('\n')}`);
+  }
+  if (modified.size > 0) {
+    lines.push(
+      `\nPieces revised:\n${[...modified.entries()]
+        .map(([title, wc]) => {
+          const delta = wc.newWordCount - wc.oldWordCount;
+          const sign = delta >= 0 ? '+' : '';
+          return `- ${title} (${sign}${delta} words, now ${wc.newWordCount})`;
+        })
+        .join('\n')}`
+    );
+  }
+  if (deleted.size > 0) {
+    lines.push(`\nPieces removed:\n${[...deleted].map((t) => `- ${t}`).join('\n')}`);
+  }
+
+  return lines.join('\n');
+}
 
 /**
  * Check if the corpus is stale (last import older than threshold).

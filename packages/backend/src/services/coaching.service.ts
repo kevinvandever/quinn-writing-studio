@@ -181,7 +181,8 @@ export async function sendSessionMessage(
     [sessionId, content]
   );
 
-  // Load conversation history for this session
+  // Load conversation history for this session (windowed to last 20 messages
+  // to prevent context overflow in long sessions)
   const messagesResult = await query<MessageRow>(
     `SELECT id, session_id, role, content, model_used, model_reason, token_count_input, token_count_output, created_at
      FROM messages
@@ -190,12 +191,35 @@ export async function sendSessionMessage(
     [sessionId]
   );
 
-  const conversationMessages: ClaudeMessage[] = messagesResult.rows
-    .filter((m) => m.role === 'user' || m.role === 'assistant')
-    .map((m) => ({
+  const allMessages = messagesResult.rows
+    .filter((m) => m.role === 'user' || m.role === 'assistant');
+
+  // Keep the last 20 messages (10 exchanges) for context.
+  // If we're windowing, prepend a brief note so Quinn knows there's prior history.
+  const WINDOW_SIZE = 20;
+  let conversationMessages: ClaudeMessage[];
+  if (allMessages.length > WINDOW_SIZE) {
+    const windowed = allMessages.slice(-WINDOW_SIZE);
+    conversationMessages = [
+      {
+        role: 'user' as const,
+        content: `[Note: This session has ${allMessages.length} messages total. Showing the most recent ${WINDOW_SIZE} for context. Refer to Session Memory above for earlier topics.]`,
+      },
+      {
+        role: 'assistant' as const,
+        content: `[Understood — I have our earlier conversation in memory via the session history.]`,
+      },
+      ...windowed.map((m) => ({
+        role: m.role as 'user' | 'assistant',
+        content: m.content,
+      })),
+    ];
+  } else {
+    conversationMessages = allMessages.map((m) => ({
       role: m.role as 'user' | 'assistant',
       content: m.content,
     }));
+  }
 
   // Load persona config
   const personaConfig = await loadPersonaConfig(userId);

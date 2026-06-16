@@ -12,6 +12,11 @@ export interface DoneEvent {
   outputTokens: number;
 }
 
+export interface RetryingEvent {
+  attempt: number;
+  delayMs: number;
+}
+
 export interface SSEStreamOptions {
   /** Request body to send with the POST request */
   body?: unknown;
@@ -26,6 +31,8 @@ export interface SSEStream {
   onModelInfo: (callback: (info: ModelInfo) => void) => SSEStream;
   /** Called when the stream is complete */
   onDone: (callback: (event: DoneEvent) => void) => SSEStream;
+  /** Called when the server is retrying after a transient error */
+  onRetrying: (callback: (event: RetryingEvent) => void) => SSEStream;
   /** Called on error */
   onError: (callback: (error: Error) => void) => SSEStream;
   /** Abort the stream */
@@ -53,6 +60,7 @@ export function createSSEStream(
   let tokenCallback: ((token: string) => void) | null = null;
   let modelInfoCallback: ((info: ModelInfo) => void) | null = null;
   let doneCallback: ((event: DoneEvent) => void) | null = null;
+  let retryingCallback: ((event: RetryingEvent) => void) | null = null;
   let errorCallback: ((error: Error) => void) | null = null;
 
   const abortController = new AbortController();
@@ -171,6 +179,12 @@ export function createSSEStream(
           }
           break;
 
+        case 'retrying':
+          if (retryingCallback) {
+            retryingCallback(parsed as unknown as RetryingEvent);
+          }
+          break;
+
         case 'error':
           if (errorCallback) {
             const msg =
@@ -197,6 +211,10 @@ export function createSSEStream(
     },
     onDone(callback) {
       doneCallback = callback;
+      return stream;
+    },
+    onRetrying(callback) {
+      retryingCallback = callback;
       return stream;
     },
     onError(callback) {

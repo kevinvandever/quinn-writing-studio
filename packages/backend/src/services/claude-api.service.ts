@@ -159,70 +159,124 @@ export function streamToSSE(
   );
 
   let aborted = false;
+  let currentStream: ReturnType<typeof anthropic.messages.stream> | null = null;
 
-  const stream = anthropic.messages.stream({
-    model: modelId,
-    max_tokens: 4096,
-    system: systemPrompt,
-    messages: messages.map((m) => ({
-      role: m.role,
-      content: m.content,
-    })),
-  });
+  /**
+   * Determine if an error is transient and worth retrying.
+   * Overloaded (529), rate limit (429), and server errors (5xx) are transient.
+   */
+  function isRetryableError(error: unknown): boolean {
+    const err = error as { status?: number; error?: { type?: string }; message?: string };
+    if (err?.status === 529 || err?.status === 429 || (err?.status && err.status >= 500)) {
+      return true;
+    }
+    const errorType = err?.error?.type || '';
+    if (errorType === 'overloaded_error' || errorType === 'api_error' || errorType === 'rate_limit_error') {
+      return true;
+    }
+    const msg = (err?.message || '').toLowerCase();
+    return msg.includes('overloaded') || msg.includes('rate limit') || msg.includes('timeout');
+  }
+
+  const MAX_RETRIES = 4;
 
   const promise = new Promise<ClaudeResponse>((resolve, reject) => {
     let fullContent = '';
 
-    stream.on('text', (text) => {
+    /**
+     * Attempt the stream. If it fails before any text is emitted with a
+     * retryable error, wait with exponential backoff and try again.
+     */
+    async function attempt(retryCount: number): Promise<void> {
       if (aborted) return;
-      fullContent += text;
-      res.write(`event: token\ndata: ${JSON.stringify({ token: text })}\n\n`);
-    });
 
-    stream.on('error', (error) => {
-      if (aborted) return;
-      res.write(
-        `event: error\ndata: ${JSON.stringify({ message: error.message })}\n\n`
-      );
-      res.end();
-      reject(error);
-    });
+      let streamedAnyText = false;
+      const stream = anthropic.messages.stream({
+        model: modelId,
+        max_tokens: 4096,
+        system: systemPrompt,
+        messages: messages.map((m) => ({
+          role: m.role,
+          content: m.content,
+        })),
+      });
+      currentStream = stream;
 
-    stream.on('end', () => {
-      // Wait for finalMessage to get token counts
-      stream
-        .finalMessage()
-        .then((finalMessage) => {
-          if (aborted) return;
+      stream.on('text', (text) => {
+        if (aborted) return;
+        streamedAnyText = true;
+        fullContent += text;
+        res.write(`event: token\ndata: ${JSON.stringify({ token: text })}\n\n`);
+      });
 
-          const response: ClaudeResponse = {
-            content: fullContent,
-            model,
-            reason: modelReason,
-            inputTokens: finalMessage.usage.input_tokens,
-            outputTokens: finalMessage.usage.output_tokens,
-          };
+      stream.on('error', async (error) => {
+        if (aborted) return;
 
-          res.write(
-            `event: done\ndata: ${JSON.stringify({ inputTokens: response.inputTokens, outputTokens: response.outputTokens })}\n\n`
+        // If we can still retry and nothing has been streamed yet, back off and retry
+        if (!streamedAnyText && retryCount < MAX_RETRIES && isRetryableError(error)) {
+          const delayMs = Math.min(1000 * Math.pow(2, retryCount), 8000);
+          console.warn(
+            `[Claude] Transient error (${(error as Error).message}). Retry ${retryCount + 1}/${MAX_RETRIES} in ${delayMs}ms`
           );
-          res.end();
-          resolve(response);
-        })
-        .catch((err) => {
-          if (aborted) return;
+          // Let the client know we're retrying so the UI can show a status
           res.write(
-            `event: error\ndata: ${JSON.stringify({ message: (err as Error).message })}\n\n`
+            `event: retrying\ndata: ${JSON.stringify({ attempt: retryCount + 1, delayMs })}\n\n`
           );
-          res.end();
-          reject(err);
-        });
-    });
+          setTimeout(() => {
+            if (!aborted) attempt(retryCount + 1);
+          }, delayMs);
+          return;
+        }
+
+        // Out of retries or already streaming — surface the error
+        const friendlyMessage = isRetryableError(error)
+          ? 'Quinn is experiencing high demand right now. Please try again in a moment.'
+          : (error as Error).message;
+        res.write(
+          `event: error\ndata: ${JSON.stringify({ message: friendlyMessage })}\n\n`
+        );
+        res.end();
+        reject(error);
+      });
+
+      stream.on('end', () => {
+        // Wait for finalMessage to get token counts
+        stream
+          .finalMessage()
+          .then((finalMessage) => {
+            if (aborted) return;
+
+            const response: ClaudeResponse = {
+              content: fullContent,
+              model,
+              reason: modelReason,
+              inputTokens: finalMessage.usage.input_tokens,
+              outputTokens: finalMessage.usage.output_tokens,
+            };
+
+            res.write(
+              `event: done\ndata: ${JSON.stringify({ inputTokens: response.inputTokens, outputTokens: response.outputTokens })}\n\n`
+            );
+            res.end();
+            resolve(response);
+          })
+          .catch((err) => {
+            if (aborted) return;
+            res.write(
+              `event: error\ndata: ${JSON.stringify({ message: (err as Error).message })}\n\n`
+            );
+            res.end();
+            reject(err);
+          });
+      });
+    }
+
+    attempt(0);
   });
 
   const abort = () => {
     aborted = true;
-    stream.abort();
+    if (currentStream) currentStream.abort();
     res.end();
   };
 

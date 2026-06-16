@@ -155,6 +155,9 @@ export function CoachingWorkspace() {
       .onModelInfo((info) => {
         setModelInfo(info);
       })
+      .onRetrying((event) => {
+        setStreamingContent(`Quinn is in high demand right now — trying again (attempt ${event.attempt})...`);
+      })
       .onDone((_event: DoneEvent) => {
         // Add the complete assistant message
         const assistantMessage: Message = {

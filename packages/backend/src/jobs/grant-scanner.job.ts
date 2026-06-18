@@ -17,23 +17,13 @@ interface GrantSource {
 
 const DEFAULT_GRANT_SOURCES: GrantSource[] = [
   {
-    name: 'Grants.gov - Arts',
-    url: 'https://www.grants.gov/rss/GG_OppModByCategory_Arts.xml',
+    name: 'WritePeriod',
+    url: 'https://writeperiod.substack.com/feed',
     type: 'rss',
   },
   {
-    name: 'Poets & Writers',
-    url: 'https://www.pw.org/grants/feed',
-    type: 'rss',
-  },
-  {
-    name: 'AWP',
-    url: 'https://www.awpwriter.org/contests/overview/feed',
-    type: 'rss',
-  },
-  {
-    name: 'State Arts Councils',
-    url: 'https://nasaa-arts.org/nasaa_research/grants-programs/feed/',
+    name: 'Wild Writing',
+    url: 'https://wildwriting.substack.com/feed',
     type: 'rss',
   },
 ];
@@ -64,7 +54,7 @@ const RELEVANCE_KEYWORDS = [
 const parser = new RssParser({
   timeout: 30000,
   headers: {
-    'User-Agent': 'Quinn Writing Studio Intelligence Scanner/1.0',
+    'User-Agent': 'Mozilla/5.0 (compatible; QuinnWritingStudio/1.0; Intelligence Scanner)',
   },
 });
 

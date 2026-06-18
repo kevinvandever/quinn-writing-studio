@@ -17,6 +17,8 @@ const envSchema = z.object({
     .enum(['development', 'production', 'test'])
     .default('development'),
   PORT: z.coerce.number().int().positive().default(3001),
+  // Optional: you.com Search API key for web-search-based intelligence sources
+  YOU_API_KEY: z.string().optional(),
 });
 
 export type Config = z.infer<typeof envSchema>;

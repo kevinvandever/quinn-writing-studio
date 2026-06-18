@@ -4,6 +4,7 @@ import {
   processIntelligenceItems,
   type RawIntelligenceItem,
 } from '../services/intelligence.service.js';
+import { youSearch, isYouSearchEnabled } from '../services/you-search.service.js';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -26,6 +27,16 @@ const DEFAULT_GRANT_SOURCES: GrantSource[] = [
     url: 'https://wildwriting.substack.com/feed',
     type: 'rss',
   },
+];
+
+// ─── You.com Search Queries ──────────────────────────────────────────────────
+// Web searches run against you.com to surface grants not in any RSS feed.
+// Results still pass through the relevance filter below.
+
+const DEFAULT_YOU_SEARCH_QUERIES = [
+  'writing grants and fellowships for memoir and creative nonfiction writers',
+  'creative nonfiction writing residencies open for applications',
+  'literary essay grants and prizes accepting submissions',
 ];
 
 // ─── Relevance Keywords ──────────────────────────────────────────────────────
@@ -79,6 +90,20 @@ export async function runGrantScanner(userId: string): Promise<number> {
     }
   }
 
+  // Web search via you.com (if configured) — catches grants not in any feed
+  if (isYouSearchEnabled()) {
+    const queries = await getYouSearchQueries(userId);
+    for (const q of queries) {
+      try {
+        const items = await fetchFromYouSearch(q);
+        allItems.push(...items);
+        console.log(`[GrantScanner] you.com "${q.slice(0, 40)}...": ${items.length} results`);
+      } catch (error) {
+        console.error(`[GrantScanner] you.com search error for "${q}":`, error);
+      }
+    }
+  }
+
   // Filter for relevance to memoir/essay/creative nonfiction
   const relevantItems = filterForRelevance(allItems);
   console.log(`[GrantScanner] ${relevantItems.length}/${allItems.length} items passed relevance filter`);
@@ -88,6 +113,51 @@ export async function runGrantScanner(userId: string): Promise<number> {
   console.log(`[GrantScanner] Completed. Stored ${storedCount} new grant items.`);
 
   return storedCount;
+}
+
+/**
+ * Fetch grant candidates from a you.com web search query.
+ * Maps each search result into a RawIntelligenceItem for the pipeline.
+ */
+async function fetchFromYouSearch(searchQuery: string): Promise<RawIntelligenceItem[]> {
+  const results = await youSearch(searchQuery, { count: 15, freshness: 'month' });
+
+  return results.map((r) => {
+    const content = [r.description, ...r.snippets].filter(Boolean).join(' ');
+    return {
+      title: r.title,
+      source: r.url,
+      sourceName: 'you.com search',
+      content,
+      publishedAt: r.pageAge ? new Date(r.pageAge) : undefined,
+      deadline: extractDeadline(content, r.title),
+      eligibilitySummary: extractEligibility(content),
+      awardDetails: extractAwardDetails(content),
+      subcategory: categorizeGrant(r.title, content),
+    };
+  });
+}
+
+/**
+ * Get configured you.com search queries from settings, or defaults.
+ */
+async function getYouSearchQueries(userId: string): Promise<string[]> {
+  try {
+    const result = await query<{ intelligence_schedules: Record<string, unknown> | null }>(
+      `SELECT intelligence_schedules FROM settings WHERE user_id = $1`,
+      [userId]
+    );
+    const schedules = result.rows[0]?.intelligence_schedules;
+    if (schedules && typeof schedules === 'object') {
+      const queries = (schedules as Record<string, unknown>)['grant_search_queries'] as string[] | undefined;
+      if (queries && Array.isArray(queries) && queries.length > 0) {
+        return queries;
+      }
+    }
+  } catch (error) {
+    console.error('[GrantScanner] Error loading you.com queries:', error);
+  }
+  return DEFAULT_YOU_SEARCH_QUERIES;
 }
 
 /**

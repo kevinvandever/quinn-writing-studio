@@ -410,6 +410,7 @@ export interface SessionSummary {
 export interface AssemblePromptOptions {
   personaConfig: Record<string, unknown>;
   projectContext: ProjectContext;
+  manuscriptMap: string | null;
   sessionHistories: SessionSummary[];
   corpusContext: string[];
   activityContext: string | null;
@@ -444,6 +445,7 @@ export function assembleSystemPrompt(options: AssemblePromptOptions): string {
   const {
     personaConfig,
     projectContext,
+    manuscriptMap,
     sessionHistories,
     corpusContext,
     activityContext,
@@ -480,6 +482,14 @@ export function assembleSystemPrompt(options: AssemblePromptOptions): string {
   // 3. Project context
   const projectSection = buildProjectSection(projectContext);
   sections.push(projectSection);
+
+  // 3b. Manuscript structure map (full Scrivener binder — always included so
+  // Quinn knows everything that exists and where, regardless of corpus excerpts)
+  if (manuscriptMap) {
+    sections.push(
+      `## Manuscript Structure (Scrivener binder)\nThis is the writer's complete Scrivener binder as of the latest sync — your map of what exists and where. Indentation shows folder nesting; word counts reflect the most recent sync. Folder roles: [DRAFT] is the live manuscript, [RESEARCH] is notes/source material, [TRASH] is deleted (ignore unless the writer asks). Use this to locate and reference specific pieces accurately. Never claim a piece doesn't exist if it appears here, and don't invent pieces that don't.\n\n${manuscriptMap}`
+    );
+  }
 
   // 4. Session history summaries (last 3)
   if (sessionHistories.length > 0) {

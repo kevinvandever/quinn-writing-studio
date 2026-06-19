@@ -357,6 +357,10 @@ export async function sendSessionMessage(
   // plus a baseline of documents for general awareness.
   const corpusContext = await loadCorpusContext(session.project_id, content);
 
+  // Load the full manuscript map (Scrivener binder structure) so Quinn always
+  // knows what exists and where, even when content excerpts are budget-limited.
+  const manuscriptMap = await loadManuscriptMap(session.project_id);
+
   // Check inactivity for context
   const inactivityDays = await checkInactivityGap(session.project_id);
 
@@ -437,6 +441,7 @@ export async function sendSessionMessage(
       centralQuestion: project.central_question,
       description: project.description,
     },
+    manuscriptMap,
     sessionHistories: sessionSummaries,
     corpusContext,
     activityContext: combinedActivityContext,
@@ -838,20 +843,255 @@ async function loadModelRoutingPreference(userId: string): Promise<ModelRoutingP
   return 'auto';
 }
 
+// ─── Manuscript Map ────────────────────────────────────────────────────────
+
+interface CorpusNode {
+  id: string;
+  title: string;
+  wordCount: number;
+  isFolder: boolean;
+  scrivenerType: string | null;
+  sortOrder: number;
+  children: CorpusNode[];
+}
+
+/** Map a raw Scrivener binder type to a short, human role label. */
+function folderRoleLabel(scrivenerType: string | null): string | null {
+  switch (scrivenerType) {
+    case 'DraftFolder':
+      return 'DRAFT — live manuscript';
+    case 'ResearchFolder':
+      return 'RESEARCH';
+    case 'TrashFolder':
+      return 'TRASH — deleted, ignore unless asked';
+    default:
+      return null;
+  }
+}
+
 /**
- * Load corpus context for the project.
+ * Load the writer's full Scrivener binder as a rendered outline.
+ *
+ * Unlike corpus *content* (which is excerpt-based and budget-limited), this is
+ * a complete structural map — every folder and document, with word counts and
+ * folder roles — so Quinn always knows what exists, where it lives, and which
+ * folder is the live manuscript versus research or trash. Cheap to include
+ * because it carries titles and counts only, no document bodies.
+ *
+ * Returns null if the project has no Scrivener documents yet.
+ */
+async function loadManuscriptMap(projectId: string): Promise<string | null> {
+  const result = await query<{
+    id: string;
+    title: string;
+    word_count: number | null;
+    parent_id: string | null;
+    sort_order: number | null;
+    is_folder: boolean;
+    metadata: { scrivenerType?: string | null } | null;
+  }>(
+    `SELECT id, title, word_count, parent_id, sort_order, is_folder, metadata
+     FROM corpus_documents
+     WHERE project_id = $1 AND source_type = 'scrivener'`,
+    [projectId]
+  );
+
+  if (result.rows.length === 0) {
+    return null;
+  }
+
+  // Build the tree from flat rows.
+  const nodeMap = new Map<string, CorpusNode>();
+  const roots: CorpusNode[] = [];
+
+  for (const row of result.rows) {
+    nodeMap.set(row.id, {
+      id: row.id,
+      title: row.title || 'Untitled',
+      wordCount: row.word_count ?? 0,
+      isFolder: row.is_folder,
+      scrivenerType: row.metadata?.scrivenerType ?? null,
+      sortOrder: row.sort_order ?? 0,
+      children: [],
+    });
+  }
+
+  for (const row of result.rows) {
+    const node = nodeMap.get(row.id)!;
+    if (row.parent_id && nodeMap.has(row.parent_id)) {
+      nodeMap.get(row.parent_id)!.children.push(node);
+    } else {
+      roots.push(node);
+    }
+  }
+
+  const sortNodes = (nodes: CorpusNode[]): void => {
+    nodes.sort((a, b) => a.sortOrder - b.sortOrder);
+    for (const n of nodes) sortNodes(n.children);
+  };
+  sortNodes(roots);
+
+  // Tally totals so Quinn knows the true size of the binder (and won't assume
+  // there's hidden material when the list is actually complete).
+  let folderCount = 0;
+  let docCount = 0;
+  let totalWords = 0;
+  const tally = (nodes: CorpusNode[]): void => {
+    for (const n of nodes) {
+      if (n.isFolder) {
+        folderCount++;
+      } else {
+        docCount++;
+        totalWords += n.wordCount;
+      }
+      tally(n.children);
+    }
+  };
+  tally(roots);
+
+  // Count the documents (non-folders) anywhere beneath a folder.
+  const countDocsUnder = (node: CorpusNode): number =>
+    node.children.reduce(
+      (sum, child) => sum + (child.isFolder ? 0 : 1) + countDocsUnder(child),
+      0
+    );
+
+  // Render an indented outline.
+  const lines: string[] = [
+    `Binder contains ${folderCount} folder${folderCount === 1 ? '' : 's'} and ${docCount} document${docCount === 1 ? '' : 's'} (${totalWords.toLocaleString()} words total). This list is COMPLETE — every imported piece appears below. If a piece is not listed here, it has not been synced into this project (so don't claim hidden material exists when it doesn't, and don't invent pieces).`,
+    '',
+  ];
+  const MAX_CHARS = 20000; // soft cap so an enormous binder can't dominate the prompt
+  let truncated = false;
+  let renderedChars = 0;
+
+  const render = (nodes: CorpusNode[], depth: number): void => {
+    for (const node of nodes) {
+      if (renderedChars > MAX_CHARS) {
+        truncated = true;
+        return;
+      }
+      const indent = '  '.repeat(depth);
+      let line: string;
+      if (node.isFolder) {
+        const role = folderRoleLabel(node.scrivenerType);
+        const roleTag = role ? ` [${role}]` : '';
+        const pieces = countDocsUnder(node);
+        line = `${indent}${node.title}/${roleTag} — ${pieces} piece${pieces === 1 ? '' : 's'}, ${node.wordCount.toLocaleString()} words`;
+      } else {
+        line = `${indent}${node.title} — ${node.wordCount.toLocaleString()} words`;
+      }
+      lines.push(line);
+      renderedChars += line.length + 1;
+      if (node.children.length > 0) {
+        render(node.children, depth + 1);
+      }
+    }
+  };
+
+  render(roots, 0);
+
+  if (truncated) {
+    lines.push('… (binder truncated — ask about a specific folder to see the rest)');
+  }
+
+  return lines.join('\n');
+}
+
+/**
+ * Collect the ids of every document inside the Trash folder (the trash folder
+ * itself and all descendants), so corpus retrieval can exclude deleted work.
+ */
+async function loadTrashDocumentIds(projectId: string): Promise<Set<string>> {
+  const result = await query<{ id: string }>(
+    `WITH RECURSIVE trash AS (
+       SELECT id FROM corpus_documents
+        WHERE project_id = $1 AND source_type = 'scrivener' AND is_folder = true
+          AND (metadata->>'scrivenerType' = 'TrashFolder' OR lower(title) = 'trash')
+       UNION ALL
+       SELECT c.id FROM corpus_documents c
+         JOIN trash t ON c.parent_id = t.id
+     )
+     SELECT id FROM trash`,
+    [projectId]
+  );
+  return new Set(result.rows.map((r) => r.id));
+}
+
+/**
+ * Return non-folder document ids in true Scrivener binder order (depth-first
+ * through the folder tree), excluding anything in Trash. Cheap — pulls only
+ * structural columns, no document content.
+ */
+async function loadBinderLeafOrder(projectId: string, trashIds: Set<string>): Promise<string[]> {
+  const result = await query<{
+    id: string;
+    parent_id: string | null;
+    sort_order: number | null;
+    is_folder: boolean;
+  }>(
+    `SELECT id, parent_id, sort_order, is_folder
+     FROM corpus_documents
+     WHERE project_id = $1 AND source_type = 'scrivener'`,
+    [projectId]
+  );
+
+  interface OrderNode {
+    id: string;
+    sortOrder: number;
+    isFolder: boolean;
+    children: OrderNode[];
+  }
+
+  const map = new Map<string, OrderNode>();
+  const roots: OrderNode[] = [];
+  for (const r of result.rows) {
+    map.set(r.id, { id: r.id, sortOrder: r.sort_order ?? 0, isFolder: r.is_folder, children: [] });
+  }
+  for (const r of result.rows) {
+    const node = map.get(r.id)!;
+    if (r.parent_id && map.has(r.parent_id)) {
+      map.get(r.parent_id)!.children.push(node);
+    } else {
+      roots.push(node);
+    }
+  }
+
+  const sortRec = (nodes: OrderNode[]): void => {
+    nodes.sort((a, b) => a.sortOrder - b.sortOrder);
+    nodes.forEach((n) => sortRec(n.children));
+  };
+  sortRec(roots);
+
+  const ordered: string[] = [];
+  const dfs = (nodes: OrderNode[]): void => {
+    for (const node of nodes) {
+      if (trashIds.has(node.id)) continue; // skips the trash folder and its whole subtree
+      if (!node.isFolder) ordered.push(node.id);
+      if (node.children.length > 0) dfs(node.children);
+    }
+  };
+  dfs(roots);
+  return ordered;
+}
+
+/**
+ * Load corpus context (document excerpts) for the project.
  *
  * Combines two strategies:
  * 1. Relevance: documents whose title or content matches keywords in the
  *    user's current message (so asking about a specific essay surfaces it).
- * 2. Baseline: a set of documents ordered by binder position, so Quinn
- *    always has general awareness of the project even for vague messages.
+ * 2. Baseline: documents in true binder order, so Quinn has general awareness
+ *    of the manuscript even for vague messages.
  *
- * Returns up to ~25 documents total, de-duplicated, relevant ones first.
+ * Trash is always excluded. Excerpts are ordered relevant-first; the system
+ * prompt's token budget decides how many actually fit, so there's no arbitrary
+ * document cap here beyond a sane upper bound.
  */
 async function loadCorpusContext(projectId: string, userMessage?: string): Promise<string[]> {
   const seen = new Set<string>();
   const docs: Array<{ title: string; content: string }> = [];
+  const trashIds = await loadTrashDocumentIds(projectId);
 
   // 1. Relevance-matched documents (if we have a message to match against)
   if (userMessage && userMessage.trim().length > 0) {
@@ -878,11 +1118,12 @@ async function loadCorpusContext(projectId: string, userMessage?: string): Promi
              AND content != ''
              AND to_tsvector('english', coalesce(title,'') || ' ' || coalesce(content,'')) @@ to_tsquery('english', $2)
            ORDER BY rank DESC
-           LIMIT 10`,
+           LIMIT 15`,
           [projectId, tsquery]
         );
 
         for (const row of relevant.rows) {
+          if (trashIds.has(row.id)) continue; // never surface deleted work
           if (!seen.has(row.id)) {
             seen.add(row.id);
             docs.push({ title: row.title, content: row.content });
@@ -895,20 +1136,25 @@ async function loadCorpusContext(projectId: string, userMessage?: string): Promi
     }
   }
 
-  // 2. Baseline documents by binder order (stable, predictable)
-  const baseline = await query<{ id: string; title: string; content: string }>(
-    `SELECT id, title, content FROM corpus_documents
-     WHERE project_id = $1 AND is_folder = false AND content != ''
-     ORDER BY sort_order ASC
-     LIMIT 25`,
-    [projectId]
-  );
+  // 2. Baseline documents in true binder order (excluding trash)
+  const BASELINE_LIMIT = 40;
+  const orderedLeafIds = await loadBinderLeafOrder(projectId, trashIds);
+  const baselineIds = orderedLeafIds.filter((id) => !seen.has(id)).slice(0, BASELINE_LIMIT);
 
-  for (const row of baseline.rows) {
-    if (docs.length >= 25) break;
-    if (!seen.has(row.id)) {
-      seen.add(row.id);
-      docs.push({ title: row.title, content: row.content });
+  if (baselineIds.length > 0) {
+    const baseline = await query<{ id: string; title: string; content: string }>(
+      `SELECT id, title, content FROM corpus_documents
+       WHERE id = ANY($1::uuid[]) AND content != ''`,
+      [baselineIds]
+    );
+    const byId = new Map(baseline.rows.map((r) => [r.id, r]));
+    // Preserve binder order from baselineIds
+    for (const id of baselineIds) {
+      const row = byId.get(id);
+      if (row && !seen.has(id)) {
+        seen.add(id);
+        docs.push({ title: row.title, content: row.content });
+      }
     }
   }
 

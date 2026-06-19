@@ -18,6 +18,12 @@ export interface ParsedDocument {
   wordCount: number;
   contentHash: string;
   isFolder: boolean;
+  /**
+   * Raw Scrivener binder item type (e.g. 'Text', 'Folder', 'DraftFolder',
+   * 'ResearchFolder', 'TrashFolder'). Preserved so the coach can distinguish
+   * the live manuscript from research notes and trash.
+   */
+  scrivenerType: string;
   sortOrder: number;
   children: ParsedDocument[];
 }
@@ -149,6 +155,7 @@ export function parseScrivenerZip(zipBuffer: Buffer, filename: string): Scrivene
         wordCount,
         contentHash,
         isFolder,
+        scrivenerType: type,
         sortOrder: sortStart + i,
         children,
       });

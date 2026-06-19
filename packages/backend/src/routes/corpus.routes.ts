@@ -558,8 +558,8 @@ async function insertDocuments(
     const safeTitle = (doc.title || '').replace(/\0/g, '');
 
     const result = await client.query<{ id: string }>(
-      `INSERT INTO corpus_documents (project_id, source_type, source_id, title, content, content_hash, word_count, parent_id, sort_order, is_folder, import_id)
-       VALUES ($1, 'scrivener', $2, $3, $4, $5, $6, $7, $8, $9, $10)
+      `INSERT INTO corpus_documents (project_id, source_type, source_id, title, content, content_hash, word_count, parent_id, sort_order, is_folder, metadata, import_id)
+       VALUES ($1, 'scrivener', $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
        RETURNING id`,
       [
         projectId,
@@ -571,6 +571,7 @@ async function insertDocuments(
         parentId,
         doc.sortOrder,
         doc.isFolder,
+        JSON.stringify({ scrivenerType: doc.scrivenerType ?? null }),
         importId,
       ]
     );

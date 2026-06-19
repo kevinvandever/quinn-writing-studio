@@ -124,6 +124,7 @@ export function parseScrivenerDirectory(scrivPath: string): ScrivenerParseResult
         wordCount,
         contentHash,
         isFolder,
+        scrivenerType: type,
         sortOrder: sortStart + i,
         children,
       });

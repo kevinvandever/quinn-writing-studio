@@ -134,12 +134,13 @@ export function CoachingWorkspace() {
     initSession();
   }, [projectId]);
 
-  // Send message handler
-  const handleSendMessage = useCallback(async () => {
-    if (!session || !inputValue.trim() || isStreaming) return;
+  // Send message handler. Pass overrideContent to send a command (e.g. /help)
+  // without going through the input box.
+  const handleSendMessage = useCallback(async (overrideContent?: string) => {
+    const content = (overrideContent ?? inputValue).trim();
+    if (!session || !content || isStreaming) return;
 
-    const content = inputValue.trim();
-    setInputValue('');
+    if (overrideContent === undefined) setInputValue('');
     setIsStreaming(true);
     setStreamingContent('');
     setModelInfo(null);
@@ -270,14 +271,24 @@ export function CoachingWorkspace() {
         </div>
         <div className="flex items-center gap-3">
           {session && !session.ended_at && (
-            <button
-              onClick={handleEndSession}
-              disabled={isEndingSession}
-              className="px-4 py-2 text-sm font-medium text-warm-700 bg-warm-200 rounded-lg hover:bg-warm-300 hover:text-ink transition-colors border border-warm-300 disabled:opacity-60 disabled:cursor-not-allowed"
-              title="End this session and save Quinn's notes"
-            >
-              {isEndingSession ? 'Saving notes...' : 'End Session'}
-            </button>
+            <>
+              <button
+                onClick={() => handleSendMessage('/help')}
+                disabled={isStreaming}
+                className="px-3 py-2 text-sm font-medium text-sage-700 bg-sage-100 rounded-lg hover:bg-sage-200 transition-colors border border-sage-200 disabled:opacity-60 disabled:cursor-not-allowed"
+                title="Show Quinn's structured coaching workflows"
+              >
+                Workflows
+              </button>
+              <button
+                onClick={handleEndSession}
+                disabled={isEndingSession}
+                className="px-4 py-2 text-sm font-medium text-warm-700 bg-warm-200 rounded-lg hover:bg-warm-300 hover:text-ink transition-colors border border-warm-300 disabled:opacity-60 disabled:cursor-not-allowed"
+                title="End this session and save Quinn's notes"
+              >
+                {isEndingSession ? 'Saving notes...' : 'End Session'}
+              </button>
+            </>
           )}
         </div>
       </div>
@@ -320,6 +331,9 @@ export function CoachingWorkspace() {
             <p className="text-3xl mb-3">🖋️</p>
             <p className="font-serif text-lg text-ink">What are we working on today?</p>
             <p className="text-sm mt-2 text-warm-500">Quinn is ready when you are.</p>
+            <p className="text-sm mt-1 text-warm-500">
+              Tip: type <span className="font-mono text-sage-700">/help</span> (or tap Workflows) to run a structured session like Essay Triage or an Editorial Pass.
+            </p>
           </div>
         )}
 
@@ -375,14 +389,14 @@ export function CoachingWorkspace() {
               value={inputValue}
               onChange={(e) => setInputValue(e.target.value)}
               onKeyDown={handleKeyDown}
-              placeholder="What's on your mind..."
+              placeholder="What's on your mind... (type /help for workflows)"
               className="flex-1 resize-none rounded-xl border border-warm-300 bg-white px-4 py-3 text-coaching text-ink placeholder:text-warm-400 focus:outline-none focus:ring-2 focus:ring-sage-400 focus:border-transparent min-h-[48px] max-h-[200px] transition-shadow"
               rows={1}
               disabled={isStreaming}
               aria-label="Message input"
             />
             <button
-              onClick={handleSendMessage}
+              onClick={() => handleSendMessage()}
               disabled={!inputValue.trim() || isStreaming}
               className="px-4 py-3 bg-sage-600 text-white rounded-xl hover:bg-sage-700 disabled:opacity-40 disabled:cursor-not-allowed transition-colors shadow-sm"
               aria-label="Send message"

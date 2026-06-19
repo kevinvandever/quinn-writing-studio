@@ -411,6 +411,7 @@ export interface AssemblePromptOptions {
   personaConfig: Record<string, unknown>;
   projectContext: ProjectContext;
   manuscriptMap: string | null;
+  workflowContext: string | null;
   sessionHistories: SessionSummary[];
   corpusContext: string[];
   activityContext: string | null;
@@ -446,6 +447,7 @@ export function assembleSystemPrompt(options: AssemblePromptOptions): string {
     personaConfig,
     projectContext,
     manuscriptMap,
+    workflowContext,
     sessionHistories,
     corpusContext,
     activityContext,
@@ -504,6 +506,12 @@ export function assembleSystemPrompt(options: AssemblePromptOptions): string {
 
   // 6. Task-specific instructions
   sections.push(`## Current Task Instructions\n${taskInstructions}`);
+
+  // 6b. Active workflow (if running) — this takes precedence over the general
+  // task instructions: Quinn should focus on the current step only.
+  if (workflowContext) {
+    sections.push(workflowContext);
+  }
 
   // Calculate remaining budget for corpus context
   const currentLength = sections.join('\n\n').length;

@@ -17,6 +17,7 @@ import {
   type ScrivenerParseResult,
 } from '../services/scrivener-parser.service.js';
 import { checkDocumentThemes } from '../services/theme-analysis.service.js';
+import { ensureCorpusSummaries } from '../services/corpus-summary.service.js';
 
 const router = Router();
 
@@ -166,6 +167,9 @@ router.post(
       );
 
       await client.query('COMMIT');
+
+      // Generate per-document summaries in the background (non-blocking).
+      void ensureCorpusSummaries(projectId as string, userId);
 
       res.status(201).json({
         import: {
@@ -427,6 +431,9 @@ router.post('/projects/:id/corpus/sync', asyncHandler(async (req: Request, res: 
     );
 
     await client.query('COMMIT');
+
+    // Generate per-document summaries in the background (non-blocking).
+    void ensureCorpusSummaries(projectId as string, userId);
 
     res.status(201).json({
       import: {

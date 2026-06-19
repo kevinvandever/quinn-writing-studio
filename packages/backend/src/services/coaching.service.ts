@@ -16,6 +16,12 @@ import {
 import { getEthicsPrompt, checkEthicsViolation, logEthicsBoundary } from './ethics.service.js';
 import { logApiUsage } from './usage-tracking.service.js';
 import { getRecentActivitySummary } from './activity.service.js';
+import { ensureCorpusSummaries } from './corpus-summary.service.js';
+import {
+  getWorkflow,
+  workflowsForProjectType,
+  type CoachingWorkflow,
+} from './coaching-workflows.js';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -111,6 +117,11 @@ export async function startSession(
      VALUES ($1, $2, 'session_start', $3)`,
     [userId, projectId, JSON.stringify({ session_id: session.id, session_type: sessionType })]
   );
+
+  // Backfill per-document summaries in the background so collection-level
+  // coaching has substance for every piece. Fire-and-forget — never blocks
+  // the session, and no-ops when summaries are already current.
+  void ensureCorpusSummaries(projectId, userId);
 
   // Generate a proactive opening message from Quinn (coaching sessions only).
   // She greets the writer with what she noticed changed and where they left off.
@@ -285,8 +296,9 @@ export async function sendSessionMessage(
     name: string;
     central_question: string | null;
     description: string | null;
+    project_type: string | null;
   }>(
-    `SELECT id, user_id, name, central_question, description
+    `SELECT id, user_id, name, central_question, description, project_type
      FROM projects
      WHERE id = $1 AND user_id = $2`,
     [session.project_id, userId]
@@ -304,6 +316,29 @@ export async function sendSessionMessage(
     [sessionId, content]
   );
 
+  // ── Workflow commands ──────────────────────────────────────────────────
+  // Leading-slash messages drive the workflow engine (/help, /<workflow>,
+  // /next, /back, /exit). Some are answered statically; start/next/back update
+  // state and fall through to an LLM turn with a clean directive.
+  const priorWorkflowState = await loadWorkflowState(sessionId);
+  let workflowState: WorkflowState | null = priorWorkflowState;
+  let claudeDirective: string | null = null;
+
+  if (content.trim().startsWith('/')) {
+    const outcome = await handleSlashCommand(
+      res,
+      sessionId,
+      project.project_type,
+      priorWorkflowState,
+      content
+    );
+    if (outcome.handledStatically) {
+      return; // static reply already streamed
+    }
+    workflowState = outcome.workflowState;
+    claudeDirective = outcome.claudeDirective;
+  }
+
   // Load conversation history for this session (windowed to last 20 messages
   // to prevent context overflow in long sessions)
   const messagesResult = await query<MessageRow>(
@@ -317,31 +352,48 @@ export async function sendSessionMessage(
   const allMessages = messagesResult.rows
     .filter((m) => m.role === 'user' || m.role === 'assistant');
 
+  // Build the conversation as role/content pairs.
+  const convoPairs: ClaudeMessage[] = allMessages.map((m) => ({
+    role: m.role as 'user' | 'assistant',
+    content: m.content,
+  }));
+
+  // For command-driven workflow turns (/start, /next, /back), swap the raw
+  // slash command the writer typed for a clean directive, so Claude isn't fed
+  // "/next" as the user's turn.
+  if (claudeDirective) {
+    if (convoPairs.length > 0 && convoPairs[convoPairs.length - 1]!.role === 'user') {
+      convoPairs.pop();
+    }
+    convoPairs.push({ role: 'user', content: claudeDirective });
+  }
+
   // Keep the last 20 messages (10 exchanges) for context.
   // If we're windowing, prepend a brief note so Quinn knows there's prior history.
   const WINDOW_SIZE = 20;
   let conversationMessages: ClaudeMessage[];
-  if (allMessages.length > WINDOW_SIZE) {
-    const windowed = allMessages.slice(-WINDOW_SIZE);
+  if (convoPairs.length > WINDOW_SIZE) {
+    const windowed = convoPairs.slice(-WINDOW_SIZE);
     conversationMessages = [
       {
         role: 'user' as const,
-        content: `[Note: This session has ${allMessages.length} messages total. Showing the most recent ${WINDOW_SIZE} for context. Refer to Session Memory above for earlier topics.]`,
+        content: `[Note: This session has ${convoPairs.length} messages total. Showing the most recent ${WINDOW_SIZE} for context. Refer to Session Memory above for earlier topics.]`,
       },
       {
         role: 'assistant' as const,
         content: `[Understood — I have our earlier conversation in memory via the session history.]`,
       },
-      ...windowed.map((m) => ({
-        role: m.role as 'user' | 'assistant',
-        content: m.content,
-      })),
+      ...windowed,
     ];
   } else {
-    conversationMessages = allMessages.map((m) => ({
-      role: m.role as 'user' | 'assistant',
-      content: m.content,
-    }));
+    conversationMessages = convoPairs;
+  }
+
+  // The Anthropic API requires the conversation to begin with a user turn.
+  // A session may open with Quinn's proactive greeting (an assistant message),
+  // so drop any leading assistant turns.
+  while (conversationMessages.length > 0 && conversationMessages[0]!.role === 'assistant') {
+    conversationMessages.shift();
   }
 
   // Load persona config
@@ -354,8 +406,10 @@ export async function sendSessionMessage(
   const sessionSummaries = await loadSessionSummaries(session.project_id);
 
   // Load corpus context — relevant documents based on the user's message,
-  // plus a baseline of documents for general awareness.
-  const corpusContext = await loadCorpusContext(session.project_id, content);
+  // plus a baseline of documents for general awareness. A workflow targeting a
+  // single piece forces that piece's full text into context every turn.
+  const forcedTitles = workflowState?.targetPieceTitle ? [workflowState.targetPieceTitle] : [];
+  const corpusContext = await loadCorpusContext(session.project_id, content, forcedTitles);
 
   // Load the full manuscript map (Scrivener binder structure) so Quinn always
   // knows what exists and where, even when content excerpts are budget-limited.
@@ -433,6 +487,15 @@ export async function sendSessionMessage(
       : promptlyContext;
   }
 
+  // Build the active-workflow system section (if a workflow is running).
+  let workflowContext: string | null = null;
+  if (workflowState) {
+    const activeWf = getWorkflow(workflowState.workflowId);
+    if (activeWf) {
+      workflowContext = buildWorkflowContext(activeWf, workflowState);
+    }
+  }
+
   // Assemble system prompt
   const systemPrompt = assembleSystemPrompt({
     personaConfig,
@@ -442,6 +505,7 @@ export async function sendSessionMessage(
       description: project.description,
     },
     manuscriptMap,
+    workflowContext,
     sessionHistories: sessionSummaries,
     corpusContext,
     activityContext: combinedActivityContext,
@@ -851,6 +915,7 @@ interface CorpusNode {
   wordCount: number;
   isFolder: boolean;
   scrivenerType: string | null;
+  summary: string | null;
   sortOrder: number;
   children: CorpusNode[];
 }
@@ -888,7 +953,7 @@ async function loadManuscriptMap(projectId: string): Promise<string | null> {
     parent_id: string | null;
     sort_order: number | null;
     is_folder: boolean;
-    metadata: { scrivenerType?: string | null } | null;
+    metadata: { scrivenerType?: string | null; summary?: string | null } | null;
   }>(
     `SELECT id, title, word_count, parent_id, sort_order, is_folder, metadata
      FROM corpus_documents
@@ -911,6 +976,7 @@ async function loadManuscriptMap(projectId: string): Promise<string | null> {
       wordCount: row.word_count ?? 0,
       isFolder: row.is_folder,
       scrivenerType: row.metadata?.scrivenerType ?? null,
+      summary: row.metadata?.summary ?? null,
       sortOrder: row.sort_order ?? 0,
       children: [],
     });
@@ -961,7 +1027,7 @@ async function loadManuscriptMap(projectId: string): Promise<string | null> {
     `Binder contains ${folderCount} folder${folderCount === 1 ? '' : 's'} and ${docCount} document${docCount === 1 ? '' : 's'} (${totalWords.toLocaleString()} words total). This list is COMPLETE — every imported piece appears below. If a piece is not listed here, it has not been synced into this project (so don't claim hidden material exists when it doesn't, and don't invent pieces).`,
     '',
   ];
-  const MAX_CHARS = 20000; // soft cap so an enormous binder can't dominate the prompt
+  const MAX_CHARS = 24000; // soft cap so an enormous binder can't dominate the prompt
   let truncated = false;
   let renderedChars = 0;
 
@@ -983,6 +1049,13 @@ async function loadManuscriptMap(projectId: string): Promise<string | null> {
       }
       lines.push(line);
       renderedChars += line.length + 1;
+      // Render the logline (if indexed) so collection-level reasoning has
+      // substance for every piece, not just those with full text loaded.
+      if (!node.isFolder && node.summary) {
+        const summaryLine = `${indent}  · ${node.summary}`;
+        lines.push(summaryLine);
+        renderedChars += summaryLine.length + 1;
+      }
       if (node.children.length > 0) {
         render(node.children, depth + 1);
       }
@@ -1076,24 +1149,93 @@ async function loadBinderLeafOrder(projectId: string, trashIds: Set<string>): Pr
 }
 
 /**
+ * Find documents the writer named (by title) in their message — or any titles
+ * a workflow explicitly forces into context — and return their FULL text.
+ * Distinctive essay titles ("Fenway", "Batter Up") are matched as whole
+ * phrases so a named piece is never reduced to a 3k-char excerpt when the
+ * writer actually wants to work on it.
+ */
+async function loadNamedDocuments(
+  projectId: string,
+  userMessage: string | undefined,
+  forcedTitles: string[],
+  trashIds: Set<string>
+): Promise<Array<{ id: string; title: string; content: string }>> {
+  // Pull titles only (cheap) to decide what to match before fetching bodies.
+  const titlesResult = await query<{ id: string; title: string }>(
+    `SELECT id, title FROM corpus_documents
+     WHERE project_id = $1 AND is_folder = false AND content != ''`,
+    [projectId]
+  );
+
+  const haystack = (userMessage ?? '').toLowerCase();
+  const forcedLower = forcedTitles.map((t) => t.toLowerCase().trim()).filter(Boolean);
+
+  const matchedIds: string[] = [];
+  for (const row of titlesResult.rows) {
+    if (trashIds.has(row.id)) continue;
+    const title = (row.title ?? '').trim();
+    if (title.length < 4) continue; // too short to match safely
+    const titleLower = title.toLowerCase();
+    const namedInMessage = haystack.includes(titleLower);
+    const forced = forcedLower.some(
+      (f) => f === titleLower || titleLower.includes(f) || f.includes(titleLower)
+    );
+    if (namedInMessage || forced) {
+      matchedIds.push(row.id);
+    }
+  }
+
+  // Cap so a message that happens to brush several titles can't blow the budget.
+  const ids = matchedIds.slice(0, 4);
+  if (ids.length === 0) return [];
+
+  const docsResult = await query<{ id: string; title: string; content: string }>(
+    `SELECT id, title, content FROM corpus_documents
+     WHERE id = ANY($1::uuid[]) AND content != ''`,
+    [ids]
+  );
+  return docsResult.rows;
+}
+
+/**
  * Load corpus context (document excerpts) for the project.
  *
- * Combines two strategies:
+ * Three strategies, in priority order:
+ * 0. Named: documents the writer references by title (or a workflow forces) are
+ *    loaded as FULL text, not excerpts, so deep work on a specific piece is exact.
  * 1. Relevance: documents whose title or content matches keywords in the
- *    user's current message (so asking about a specific essay surfaces it).
+ *    user's current message (so asking about a topic surfaces related pieces).
  * 2. Baseline: documents in true binder order, so Quinn has general awareness
  *    of the manuscript even for vague messages.
  *
- * Trash is always excluded. Excerpts are ordered relevant-first; the system
- * prompt's token budget decides how many actually fit, so there's no arbitrary
- * document cap here beyond a sane upper bound.
+ * Trash is always excluded. Entries are ordered named-first, then relevant, then
+ * baseline; the system prompt's token budget decides how many actually fit.
  */
-async function loadCorpusContext(projectId: string, userMessage?: string): Promise<string[]> {
+async function loadCorpusContext(
+  projectId: string,
+  userMessage?: string,
+  forcedTitles: string[] = []
+): Promise<string[]> {
   const seen = new Set<string>();
-  const docs: Array<{ title: string; content: string }> = [];
+  const docs: Array<{ title: string; content: string; full?: boolean }> = [];
   const trashIds = await loadTrashDocumentIds(projectId);
 
+  // 0. Named / forced documents — full text, highest priority.
+  const named = await loadNamedDocuments(projectId, userMessage, forcedTitles, trashIds);
+  const MAX_NAMED_CHARS = 24000; // ~4-5k words; covers a long essay in full
+  for (const d of named) {
+    if (seen.has(d.id)) continue;
+    seen.add(d.id);
+    const content =
+      d.content.length > MAX_NAMED_CHARS
+        ? d.content.slice(0, MAX_NAMED_CHARS) + '\n...[truncated]'
+        : d.content;
+    docs.push({ title: d.title, content, full: true });
+  }
+
   // 1. Relevance-matched documents (if we have a message to match against)
+
   if (userMessage && userMessage.trim().length > 0) {
     // Build a tsquery from the message words (OR-joined, prefix-matched)
     const keywords = userMessage
@@ -1159,11 +1301,246 @@ async function loadCorpusContext(projectId: string, userMessage?: string): Promi
   }
 
   return docs.map((doc) => {
+    if (doc.full) {
+      return `### ${doc.title} (FULL TEXT)\n${doc.content}`;
+    }
     const excerpt = doc.content.length > 3000
       ? doc.content.slice(0, 3000) + '...'
       : doc.content;
     return `### ${doc.title}\n${excerpt}`;
   });
+}
+
+// ─── Workflow Engine ───────────────────────────────────────────────────────
+
+/**
+ * Active-workflow state is persisted migration-free as a system message in the
+ * `messages` table, prefixed with this marker. The latest such marker wins.
+ * System messages are excluded from the LLM conversation and hidden in the UI.
+ */
+const WORKFLOW_MARKER = '[[QUINN_WORKFLOW]]';
+
+interface WorkflowState {
+  workflowId: string;
+  stepIndex: number;
+  targetPieceTitle: string | null;
+  startedAt: string;
+}
+
+/** Load the current workflow state for a session, or null if none is active. */
+async function loadWorkflowState(sessionId: string): Promise<WorkflowState | null> {
+  const result = await query<{ content: string }>(
+    `SELECT content FROM messages
+     WHERE session_id = $1 AND role = 'system' AND content LIKE $2
+     ORDER BY created_at DESC
+     LIMIT 1`,
+    [sessionId, WORKFLOW_MARKER + '%']
+  );
+  const row = result.rows[0];
+  if (!row) return null;
+  try {
+    const parsed = JSON.parse(row.content.slice(WORKFLOW_MARKER.length));
+    if (parsed && typeof parsed.workflowId === 'string' && parsed.workflowId) {
+      return {
+        workflowId: parsed.workflowId,
+        stepIndex: typeof parsed.stepIndex === 'number' ? parsed.stepIndex : 0,
+        targetPieceTitle: typeof parsed.targetPieceTitle === 'string' ? parsed.targetPieceTitle : null,
+        startedAt: typeof parsed.startedAt === 'string' ? parsed.startedAt : new Date().toISOString(),
+      };
+    }
+    return null; // an explicit "cleared" marker
+  } catch {
+    return null;
+  }
+}
+
+/** Persist a new workflow state (or null to clear it) as a marker message. */
+async function saveWorkflowState(sessionId: string, state: WorkflowState | null): Promise<void> {
+  const payload = state ? JSON.stringify(state) : 'null';
+  await query(
+    `INSERT INTO messages (session_id, role, content) VALUES ($1, 'system', $2)`,
+    [sessionId, WORKFLOW_MARKER + payload]
+  );
+}
+
+/** Persist a synthetic assistant message (used for command replies). */
+async function persistAssistantMessage(sessionId: string, content: string): Promise<void> {
+  await query(
+    `INSERT INTO messages (session_id, role, content, model_reason)
+     VALUES ($1, 'assistant', $2, 'Workflow command')`,
+    [sessionId, content]
+  );
+}
+
+/** Stream a fixed message to the client over SSE (for command replies, no LLM). */
+function streamStaticMessage(res: Response, text: string): void {
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.setHeader('X-Accel-Buffering', 'no');
+  res.flushHeaders();
+  res.write(`event: token\ndata: ${JSON.stringify({ token: text })}\n\n`);
+  res.write(`event: done\ndata: ${JSON.stringify({ inputTokens: 0, outputTokens: 0 })}\n\n`);
+  res.end();
+}
+
+/** Build the /help menu listing workflows available for this project. */
+function buildHelpMenu(projectType: string | null, state: WorkflowState | null): string {
+  const available = workflowsForProjectType(projectType);
+  const lines: string[] = ['Quinn — Coaching Workflows', ''];
+  if (available.length > 0) {
+    lines.push('Run a structured workflow, or just keep talking:');
+    for (const w of available) {
+      const piece = w.targetsSinglePiece ? ' [piece]' : '';
+      lines.push(`  /${w.id}${piece}  —  ${w.label}: ${w.description}`);
+    }
+  } else {
+    lines.push('No structured workflows are configured for this project type yet.');
+  }
+  lines.push('');
+  lines.push('Inside a workflow:  /next (advance)  ·  /back (previous step)  ·  /exit (leave)');
+  lines.push('');
+  if (state) {
+    const wf = getWorkflow(state.workflowId);
+    if (wf) {
+      const step = wf.steps[state.stepIndex];
+      lines.push(
+        `Currently running ${wf.label}, step ${state.stepIndex + 1} of ${wf.steps.length}${step ? ` — ${step.title}` : ''}.`
+      );
+    } else {
+      lines.push('Currently: no workflow active.');
+    }
+  } else {
+    lines.push('Currently: no workflow active.');
+  }
+  return lines.join('\n');
+}
+
+/** Build the system-prompt section describing the active workflow step. */
+function buildWorkflowContext(wf: CoachingWorkflow, state: WorkflowState): string {
+  const total = wf.steps.length;
+  const idx = Math.max(0, Math.min(state.stepIndex, total - 1));
+  const step = wf.steps[idx]!;
+  const parts: string[] = [
+    `## Active Workflow: ${wf.label} (step ${idx + 1} of ${total})`,
+    `You are running a structured workflow with the writer. Do ONLY the current step below, then stop and let them respond. When the step feels complete, briefly note they can say /next to continue (or /exit to stop). Never race ahead to later steps. This structure guides you — it is not a script to read aloud; stay fully in your own coaching voice.`,
+  ];
+  if (state.targetPieceTitle) {
+    parts.push(`Working piece: "${state.targetPieceTitle}" — its full text should be loaded in the corpus context below.`);
+  }
+  parts.push(`CURRENT STEP — ${step.title}:\n${step.instruction}`);
+  return parts.join('\n\n');
+}
+
+/**
+ * Result of interpreting a leading-slash command.
+ * - handled=true with a static reply means we already responded; caller returns.
+ * - otherwise the (possibly updated) workflow state and an optional directive
+ *   to feed Claude in place of the raw command are returned for the LLM turn.
+ */
+interface CommandOutcome {
+  handledStatically: boolean;
+  workflowState: WorkflowState | null;
+  claudeDirective: string | null;
+}
+
+/**
+ * Interpret a slash command. Returns whether it was fully handled (static
+ * reply already streamed) or whether the caller should proceed to an LLM turn
+ * with the returned workflow state and directive.
+ */
+async function handleSlashCommand(
+  res: Response,
+  sessionId: string,
+  projectType: string | null,
+  priorState: WorkflowState | null,
+  rawContent: string
+): Promise<CommandOutcome> {
+  const trimmed = rawContent.trim();
+  const tokens = trimmed.slice(1).split(/\s+/);
+  const cmd = (tokens[0] || '').toLowerCase();
+  const restTokens = tokens.slice(1);
+
+  const replyStatic = async (msg: string): Promise<CommandOutcome> => {
+    await persistAssistantMessage(sessionId, msg);
+    streamStaticMessage(res, msg);
+    return { handledStatically: true, workflowState: priorState, claudeDirective: null };
+  };
+
+  if (cmd === 'help' || cmd === 'workflows' || cmd === '?') {
+    return replyStatic(buildHelpMenu(projectType, priorState));
+  }
+
+  if (cmd === 'exit' || cmd === 'stop') {
+    if (priorState) {
+      await saveWorkflowState(sessionId, null);
+      const wf = getWorkflow(priorState.workflowId);
+      return replyStatic(
+        `Stepped out of ${wf ? `the ${wf.label} workflow` : 'the workflow'}. We can keep talking, or start another with /help.`
+      );
+    }
+    return replyStatic('No workflow is running right now. Use /help to see what we can run.');
+  }
+
+  if (cmd === 'next') {
+    if (!priorState) return replyStatic('No workflow is running. Use /help to start one.');
+    const wf = getWorkflow(priorState.workflowId);
+    if (!wf) return replyStatic('That workflow is no longer available. Use /help to start a new one.');
+    const atEnd = priorState.stepIndex >= wf.steps.length - 1;
+    const next = Math.min(priorState.stepIndex + 1, wf.steps.length - 1);
+    const state: WorkflowState = { ...priorState, stepIndex: next };
+    await saveWorkflowState(sessionId, state);
+    return {
+      handledStatically: false,
+      workflowState: state,
+      claudeDirective: atEnd
+        ? `(I'm ready to finish the ${wf.label} workflow — deliver the final step.)`
+        : `(I'm ready for the next step of the ${wf.label} workflow.)`,
+    };
+  }
+
+  if (cmd === 'back' || cmd === 'previous') {
+    if (!priorState) return replyStatic('No workflow is running. Use /help to start one.');
+    const wf = getWorkflow(priorState.workflowId);
+    if (!wf) return replyStatic('That workflow is no longer available. Use /help to start a new one.');
+    const prev = Math.max(priorState.stepIndex - 1, 0);
+    const state: WorkflowState = { ...priorState, stepIndex: prev };
+    await saveWorkflowState(sessionId, state);
+    return {
+      handledStatically: false,
+      workflowState: state,
+      claudeDirective: `(Let's step back to the previous step of the ${wf.label} workflow.)`,
+    };
+  }
+
+  // Otherwise treat it as starting a workflow: "/essay-triage" or "/start essay-triage [piece]"
+  const wfId = (cmd === 'start' ? (restTokens[0] || '') : cmd).toLowerCase();
+  const startArg = (cmd === 'start' ? restTokens.slice(1) : restTokens).join(' ').trim();
+  const wf = getWorkflow(wfId);
+
+  if (!wf) {
+    return replyStatic(`I don't recognize "/${cmd}". Use /help to see the workflows we can run.`);
+  }
+
+  const applicable = workflowsForProjectType(projectType).some((w) => w.id === wf.id);
+  if (!applicable) {
+    return replyStatic(
+      `The ${wf.label} workflow isn't set up for this project type. Here's what is:\n\n${buildHelpMenu(projectType, priorState)}`
+    );
+  }
+
+  const state: WorkflowState = {
+    workflowId: wf.id,
+    stepIndex: 0,
+    targetPieceTitle: wf.targetsSinglePiece && startArg ? startArg : null,
+    startedAt: new Date().toISOString(),
+  };
+  await saveWorkflowState(sessionId, state);
+  return {
+    handledStatically: false,
+    workflowState: state,
+    claudeDirective: `(Begin the ${wf.label} workflow.${state.targetPieceTitle ? ` We're working on "${state.targetPieceTitle}".` : ''})`,
+  };
 }
 
 /**

@@ -412,6 +412,7 @@ export interface AssemblePromptOptions {
   projectContext: ProjectContext;
   manuscriptMap: string | null;
   workflowContext: string | null;
+  commandContext: string | null;
   sessionHistories: SessionSummary[];
   corpusContext: string[];
   activityContext: string | null;
@@ -448,6 +449,7 @@ export function assembleSystemPrompt(options: AssemblePromptOptions): string {
     projectContext,
     manuscriptMap,
     workflowContext,
+    commandContext,
     sessionHistories,
     corpusContext,
     activityContext,
@@ -511,6 +513,11 @@ export function assembleSystemPrompt(options: AssemblePromptOptions): string {
   // task instructions: Quinn should focus on the current step only.
   if (workflowContext) {
     sections.push(workflowContext);
+  }
+
+  // 6c. One-shot prompt command (Analyze, Central Question, etc.) for this turn.
+  if (commandContext) {
+    sections.push(commandContext);
   }
 
   // Calculate remaining budget for corpus context

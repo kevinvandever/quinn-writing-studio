@@ -86,4 +86,8 @@ It is NOT a full backend `.env` and cannot run the backend. The watcher detects 
 
 ### BMAD origins
 
-Quinn began as a BMAD agent (Breakthrough Method for Agile AI-Driven Development). That history matters: her **persona** (voice, principles, Sedaris craft, ethics) was ported into the app and is seeded in `packages/backend/src/db/seed-kevin.ts` from the original BMAD agent YAML + sidecar. What did NOT come across is BMAD's structured machinery — command menus, step-gated workflows/tasks, advanced elicitation — which is why coaching currently feels like free-form chat rather than a methodical process. (Note: `structure.md` lists a `bmb-creations/` folder for agent definitions, but it is not present in the working tree.)
+Quinn began as a BMAD agent (Breakthrough Method for Agile AI-Driven Development). Her **persona** (voice, principles, Sedaris craft, ethics) was ported into the app and is seeded in `packages/backend/src/db/seed-kevin.ts`. Her BMAD **command menu and process** were re-implemented in-app in `packages/backend/src/services/coaching-workflows.ts` (workflows: /essay-triage, /editorial-pass; prompt modes: /analyze, /central-question, /coach, /progress, /checkin).
+
+The original BMAD agent definition lives OUTSIDE this repo at:
+`/Volumes/Kevin SSD/kev-dev/_bmad-output/bmb-creations/memoir-writing-coach/`
+(agent yaml + `.md`, plus a `-sidecar/` with instructions.md, memories.md, and knowledge/david-sedaris-craft-notes.md). The BMAD framework itself is at `/Volumes/Kevin SSD/kev-dev/_bmad/`. Reference these when refining Quinn's commands, voice, or craft knowledge.

@@ -19,8 +19,11 @@ import { getRecentActivitySummary } from './activity.service.js';
 import { ensureCorpusSummaries } from './corpus-summary.service.js';
 import {
   getWorkflow,
+  getPromptCommand,
   workflowsForProjectType,
+  promptCommandsForProjectType,
   type CoachingWorkflow,
+  type PromptCommand,
 } from './coaching-workflows.js';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
@@ -323,6 +326,8 @@ export async function sendSessionMessage(
   const priorWorkflowState = await loadWorkflowState(sessionId);
   let workflowState: WorkflowState | null = priorWorkflowState;
   let claudeDirective: string | null = null;
+  let commandContext: string | null = null;
+  let commandForcedTitle: string | null = null;
 
   if (content.trim().startsWith('/')) {
     const outcome = await handleSlashCommand(
@@ -337,6 +342,8 @@ export async function sendSessionMessage(
     }
     workflowState = outcome.workflowState;
     claudeDirective = outcome.claudeDirective;
+    commandContext = outcome.commandContext;
+    commandForcedTitle = outcome.forcedTitle;
   }
 
   // Load conversation history for this session (windowed to last 20 messages
@@ -406,9 +413,11 @@ export async function sendSessionMessage(
   const sessionSummaries = await loadSessionSummaries(session.project_id);
 
   // Load corpus context — relevant documents based on the user's message,
-  // plus a baseline of documents for general awareness. A workflow targeting a
-  // single piece forces that piece's full text into context every turn.
-  const forcedTitles = workflowState?.targetPieceTitle ? [workflowState.targetPieceTitle] : [];
+  // plus a baseline of documents for general awareness. A workflow or command
+  // targeting a single piece forces that piece's full text into context.
+  const forcedTitles = [workflowState?.targetPieceTitle, commandForcedTitle].filter(
+    (t): t is string => !!t
+  );
   const corpusContext = await loadCorpusContext(session.project_id, content, forcedTitles);
 
   // Load the full manuscript map (Scrivener binder structure) so Quinn always
@@ -506,6 +515,7 @@ export async function sendSessionMessage(
     },
     manuscriptMap,
     workflowContext,
+    commandContext,
     sessionHistories: sessionSummaries,
     corpusContext,
     activityContext: combinedActivityContext,
@@ -1384,20 +1394,30 @@ function streamStaticMessage(res: Response, text: string): void {
   res.end();
 }
 
-/** Build the /help menu listing workflows available for this project. */
+/** Build the /help menu listing workflows and modes available for this project. */
 function buildHelpMenu(projectType: string | null, state: WorkflowState | null): string {
-  const available = workflowsForProjectType(projectType);
-  const lines: string[] = ['Quinn — Coaching Workflows', ''];
-  if (available.length > 0) {
-    lines.push('Run a structured workflow, or just keep talking:');
-    for (const w of available) {
+  const workflows = workflowsForProjectType(projectType);
+  const prompts = promptCommandsForProjectType(projectType);
+  const lines: string[] = ['Quinn — Coaching Commands', ''];
+
+  if (workflows.length > 0) {
+    lines.push('Structured workflows (step by step):');
+    for (const w of workflows) {
       const piece = w.targetsSinglePiece ? ' [piece]' : '';
       lines.push(`  /${w.id}${piece}  —  ${w.label}: ${w.description}`);
     }
-  } else {
-    lines.push('No structured workflows are configured for this project type yet.');
+    lines.push('');
   }
-  lines.push('');
+
+  if (prompts.length > 0) {
+    lines.push('Quick modes (one response):');
+    for (const c of prompts) {
+      const piece = c.targetsSinglePiece ? ' [piece]' : '';
+      lines.push(`  /${c.id}${piece}  —  ${c.label}: ${c.description}`);
+    }
+    lines.push('');
+  }
+
   lines.push('Inside a workflow:  /next (advance)  ·  /back (previous step)  ·  /exit (leave)');
   lines.push('');
   if (state) {
@@ -1432,22 +1452,37 @@ function buildWorkflowContext(wf: CoachingWorkflow, state: WorkflowState): strin
   return parts.join('\n\n');
 }
 
+/** Build the one-turn system-prompt section for a single-shot prompt command. */
+function buildPromptCommandContext(cmd: PromptCommand, targetPieceTitle: string | null): string {
+  const parts: string[] = [
+    `## Requested Mode: ${cmd.label}`,
+    `The writer invoked this mode. Carry it out now, in your own coaching voice (this is guidance, not a script to read aloud):`,
+  ];
+  if (targetPieceTitle) {
+    parts.push(`Piece in focus: "${targetPieceTitle}" — its full text should be loaded in the corpus context below.`);
+  }
+  parts.push(cmd.instruction);
+  return parts.join('\n\n');
+}
+
 /**
  * Result of interpreting a leading-slash command.
- * - handled=true with a static reply means we already responded; caller returns.
- * - otherwise the (possibly updated) workflow state and an optional directive
- *   to feed Claude in place of the raw command are returned for the LLM turn.
+ * - handledStatically=true means we already streamed a reply; caller returns.
+ * - otherwise the caller proceeds to an LLM turn using the returned workflow
+ *   state, a directive to feed Claude in place of the raw command, an optional
+ *   one-shot command context section, and an optional piece to load in full.
  */
 interface CommandOutcome {
   handledStatically: boolean;
   workflowState: WorkflowState | null;
   claudeDirective: string | null;
+  commandContext: string | null;
+  forcedTitle: string | null;
 }
 
 /**
  * Interpret a slash command. Returns whether it was fully handled (static
- * reply already streamed) or whether the caller should proceed to an LLM turn
- * with the returned workflow state and directive.
+ * reply already streamed) or whether the caller should proceed to an LLM turn.
  */
 async function handleSlashCommand(
   res: Response,
@@ -1464,10 +1499,16 @@ async function handleSlashCommand(
   const replyStatic = async (msg: string): Promise<CommandOutcome> => {
     await persistAssistantMessage(sessionId, msg);
     streamStaticMessage(res, msg);
-    return { handledStatically: true, workflowState: priorState, claudeDirective: null };
+    return {
+      handledStatically: true,
+      workflowState: priorState,
+      claudeDirective: null,
+      commandContext: null,
+      forcedTitle: null,
+    };
   };
 
-  if (cmd === 'help' || cmd === 'workflows' || cmd === '?') {
+  if (cmd === 'help' || cmd === 'workflows' || cmd === 'commands' || cmd === '?') {
     return replyStatic(buildHelpMenu(projectType, priorState));
   }
 
@@ -1496,6 +1537,8 @@ async function handleSlashCommand(
       claudeDirective: atEnd
         ? `(I'm ready to finish the ${wf.label} workflow — deliver the final step.)`
         : `(I'm ready for the next step of the ${wf.label} workflow.)`,
+      commandContext: null,
+      forcedTitle: null,
     };
   }
 
@@ -1510,6 +1553,22 @@ async function handleSlashCommand(
       handledStatically: false,
       workflowState: state,
       claudeDirective: `(Let's step back to the previous step of the ${wf.label} workflow.)`,
+      commandContext: null,
+      forcedTitle: null,
+    };
+  }
+
+  // Single-shot prompt command (Analyze, Central Question, Coach, Progress, Check-in)?
+  const promptCmd = getPromptCommand(cmd);
+  if (promptCmd) {
+    const arg = restTokens.join(' ').trim();
+    const forcedTitle = promptCmd.targetsSinglePiece && arg ? arg : null;
+    return {
+      handledStatically: false,
+      workflowState: priorState, // prompt commands don't change workflow state
+      claudeDirective: `(Run the ${promptCmd.label} mode.${forcedTitle ? ` Focus on "${forcedTitle}".` : ''})`,
+      commandContext: buildPromptCommandContext(promptCmd, forcedTitle),
+      forcedTitle,
     };
   }
 
@@ -1519,7 +1578,7 @@ async function handleSlashCommand(
   const wf = getWorkflow(wfId);
 
   if (!wf) {
-    return replyStatic(`I don't recognize "/${cmd}". Use /help to see the workflows we can run.`);
+    return replyStatic(`I don't recognize "/${cmd}". Use /help to see the commands we can run.`);
   }
 
   const applicable = workflowsForProjectType(projectType).some((w) => w.id === wf.id);
@@ -1540,6 +1599,8 @@ async function handleSlashCommand(
     handledStatically: false,
     workflowState: state,
     claudeDirective: `(Begin the ${wf.label} workflow.${state.targetPieceTitle ? ` We're working on "${state.targetPieceTitle}".` : ''})`,
+    commandContext: null,
+    forcedTitle: null,
   };
 }
 

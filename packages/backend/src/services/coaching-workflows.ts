@@ -143,8 +143,6 @@ export const WORKFLOWS: CoachingWorkflow[] = [ESSAY_TRIAGE, EDITORIAL_PASS];
 
 // ─── Prompt commands (single-shot modes) ─────────────────────────────────────
 
-const CENTRAL_QUESTION = "What does it take to live a good life?";
-
 const PROMPT_COMMANDS: PromptCommand[] = [
   {
     id: 'analyze',
@@ -153,17 +151,17 @@ const PROMPT_COMMANDS: PromptCommand[] = [
     description: 'Find connections, patterns, and themes across the corpus.',
     preferOpus: true,
     instruction:
-      `Perform a deep analysis of the writer's corpus using the manuscript map and per-piece loglines (and any full texts loaded). Find connections across years of writing; identify patterns in themes, voice, and recurring topics; map the work to the central question ("${CENTRAL_QUESTION}"); uncover hidden gems the writer may undervalue; spot stories told more than once from different angles; and note how the voice has evolved. Be specific — cite pieces by name. Offer this as observations to explore together, not verdicts.`,
+      `Perform a deep analysis of the writer's corpus using the manuscript map and per-piece loglines (and any full texts loaded). Find connections across the work; identify patterns in themes, voice, and recurring topics; map the work to this project's central question (stated in the Active Project section above — if the project has no stated central question, map instead to its apparent purpose and recurring themes); uncover hidden gems the writer may undervalue; spot ideas covered more than once from different angles; and note how the voice has evolved. Be specific — cite pieces by name. Offer this as observations to explore together, not verdicts.`,
   },
   {
     id: 'central-question',
     aliases: ['cq', 'central'],
     label: 'Central Question Check',
-    description: 'Does a given essay serve the central question? Name the piece.',
+    description: "Does a given piece serve the project's central question? Name the piece.",
     targetsSinglePiece: true,
     preferOpus: true,
     instruction:
-      `Assess whether the named piece serves the central question ("${CENTRAL_QUESTION}"). Be honest, specific, and compassionate: what in the piece speaks to the question, what doesn't, and whether it earns its place. If it doesn't serve the question directly, consider whether it serves the collection another way. Flags and reasoning; the writer decides.`,
+      `Assess whether the named piece serves this project's central question (stated in the Active Project section above). If the project has no stated central question, assess instead whether the piece serves the project's apparent purpose and themes. Be honest, specific, and compassionate: what in the piece speaks to it, what doesn't, and whether it earns its place. If it doesn't serve directly, consider whether it serves the collection another way. Flags and reasoning; the writer decides.`,
   },
   {
     id: 'coach',
@@ -177,9 +175,9 @@ const PROMPT_COMMANDS: PromptCommand[] = [
     id: 'progress',
     aliases: ['pr', 'progress-report'],
     label: 'Progress Report',
-    description: 'Where the collection stands, roadblocks, and what matters most next.',
+    description: 'Where the project stands, roadblocks, and what matters most next.',
     instruction:
-      `Give a grounded progress report on the collection: where things stand now (use the manuscript map and recent activity), what's working, what the roadblocks are, and what matters most to do next. Gentle urgency, celebrate real milestones, no panic. End with a small, realistic next focus.`,
+      `Give a grounded progress report on this project: where things stand now (use the manuscript map and recent activity), what's working, what the roadblocks are, and what matters most to do next. Gentle urgency, celebrate real milestones, no panic. End with a small, realistic next focus.`,
   },
   {
     id: 'checkin',

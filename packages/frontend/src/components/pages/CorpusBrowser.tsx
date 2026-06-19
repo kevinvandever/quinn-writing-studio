@@ -1,6 +1,7 @@
 import { useParams } from 'react-router-dom';
 import { CorpusBrowser as ScrivenerCorpusBrowser } from '../corpus/CorpusBrowser';
 import { SubstackSettings } from '../settings/SubstackSettings';
+import { ProjectBriefEditor } from '../projects/ProjectBriefEditor';
 import { useProjectStore } from '../../stores/projectStore';
 
 /**
@@ -26,11 +27,17 @@ export function CorpusBrowser() {
   if (project.project_type === 'substack' || project.project_type === 'promptly') {
     return (
       <div className="max-w-2xl mx-auto">
+        <ProjectBriefEditor project={project} />
         <SubstackSettings projectId={project.id} projectName={project.name} />
       </div>
     );
   }
 
   // Essay collection and custom projects show the Scrivener corpus browser
-  return <ScrivenerCorpusBrowser />;
+  return (
+    <div>
+      <ProjectBriefEditor project={project} />
+      <ScrivenerCorpusBrowser />
+    </div>
+  );
 }

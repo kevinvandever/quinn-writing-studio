@@ -1302,10 +1302,20 @@ async function loadCorpusContext(
     }
   }
 
-  // 2. Baseline documents in true binder order (excluding trash)
+  // 2. Baseline documents (excluding trash). Scrivener projects use true binder
+  // order; non-Scrivener projects (Substack/Promptly) have no binder, so their
+  // docs are ordered by recency. Combine so mixed or either-type projects work.
   const BASELINE_LIMIT = 40;
-  const orderedLeafIds = await loadBinderLeafOrder(projectId, trashIds);
-  const baselineIds = orderedLeafIds.filter((id) => !seen.has(id)).slice(0, BASELINE_LIMIT);
+  const scrivenerLeafIds = await loadBinderLeafOrder(projectId, trashIds);
+  const nonScrivener = await query<{ id: string }>(
+    `SELECT id FROM corpus_documents
+     WHERE project_id = $1 AND source_type != 'scrivener' AND is_folder = false AND content != ''
+     ORDER BY updated_at DESC
+     LIMIT $2`,
+    [projectId, BASELINE_LIMIT]
+  );
+  const orderedBaseline = [...scrivenerLeafIds, ...nonScrivener.rows.map((r) => r.id)];
+  const baselineIds = orderedBaseline.filter((id) => !seen.has(id)).slice(0, BASELINE_LIMIT);
 
   if (baselineIds.length > 0) {
     const baseline = await query<{ id: string; title: string; content: string }>(
@@ -1314,7 +1324,7 @@ async function loadCorpusContext(
       [baselineIds]
     );
     const byId = new Map(baseline.rows.map((r) => [r.id, r]));
-    // Preserve binder order from baselineIds
+    // Preserve the combined order from baselineIds
     for (const id of baselineIds) {
       const row = byId.get(id);
       if (row && !seen.has(id)) {

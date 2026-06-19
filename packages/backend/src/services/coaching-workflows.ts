@@ -40,6 +40,8 @@ export interface CoachingWorkflow {
   projectTypes?: string[];
   /** Whether it operates on a single named piece (forces full text). */
   targetsSinglePiece?: boolean;
+  /** Prefer Opus for this workflow when model routing is on auto. */
+  preferOpus?: boolean;
   intro: string;
   steps: WorkflowStep[];
 }
@@ -53,6 +55,8 @@ export interface PromptCommand {
   projectTypes?: string[];
   /** Whether it operates on a single named piece (forces full text). */
   targetsSinglePiece?: boolean;
+  /** Prefer Opus for this mode when model routing is on auto. */
+  preferOpus?: boolean;
   /** One-turn instruction injected into the system prompt for the response. */
   instruction: string;
 }
@@ -66,6 +70,7 @@ const ESSAY_TRIAGE: CoachingWorkflow = {
   description:
     'Sort the collection against its central question — keep / cut / merge / revisit — then decide the "right number" and sequence the keepers (Muriel as capstone).',
   projectTypes: ['essay_collection'],
+  preferOpus: true,
   intro:
     "We'll triage the collection against your central question, cluster by cluster, then shape what stays into a book. I flag and reason; every call is yours. /next to advance, /exit to stop.",
   steps: [
@@ -103,6 +108,7 @@ const EDITORIAL_PASS: CoachingWorkflow = {
   description:
     "A close, flag-don't-cut editorial read of one piece — orient, structural flags, line-level flags, then a prioritized revision plan.",
   targetsSinglePiece: true,
+  preferOpus: true,
   intro:
     "We'll do a close editorial read of one piece — I flag and reason, I never rewrite. Name the piece if you haven't (e.g. /editorial-pass Fenway). /next to advance, /exit to stop.",
   steps: [
@@ -145,6 +151,7 @@ const PROMPT_COMMANDS: PromptCommand[] = [
     aliases: ['an', 'analyze-writing'],
     label: 'Analyze Writing',
     description: 'Find connections, patterns, and themes across the corpus.',
+    preferOpus: true,
     instruction:
       `Perform a deep analysis of the writer's corpus using the manuscript map and per-piece loglines (and any full texts loaded). Find connections across years of writing; identify patterns in themes, voice, and recurring topics; map the work to the central question ("${CENTRAL_QUESTION}"); uncover hidden gems the writer may undervalue; spot stories told more than once from different angles; and note how the voice has evolved. Be specific — cite pieces by name. Offer this as observations to explore together, not verdicts.`,
   },
@@ -154,6 +161,7 @@ const PROMPT_COMMANDS: PromptCommand[] = [
     label: 'Central Question Check',
     description: 'Does a given essay serve the central question? Name the piece.',
     targetsSinglePiece: true,
+    preferOpus: true,
     instruction:
       `Assess whether the named piece serves the central question ("${CENTRAL_QUESTION}"). Be honest, specific, and compassionate: what in the piece speaks to the question, what doesn't, and whether it earns its place. If it doesn't serve the question directly, consider whether it serves the collection another way. Flags and reasoning; the writer decides.`,
   },

@@ -328,6 +328,7 @@ export async function sendSessionMessage(
   let claudeDirective: string | null = null;
   let commandContext: string | null = null;
   let commandForcedTitle: string | null = null;
+  let commandPreferOpus = false;
 
   if (content.trim().startsWith('/')) {
     const outcome = await handleSlashCommand(
@@ -344,6 +345,7 @@ export async function sendSessionMessage(
     claudeDirective = outcome.claudeDirective;
     commandContext = outcome.commandContext;
     commandForcedTitle = outcome.forcedTitle;
+    commandPreferOpus = outcome.preferOpus;
   }
 
   // Load conversation history for this session (windowed to last 20 messages
@@ -487,6 +489,18 @@ export async function sendSessionMessage(
     },
     modelPreference
   );
+
+  // Heavy workflows and deep modes prefer Opus for fuller analysis — but only
+  // when routing is on auto (an explicit always_sonnet preference still wins).
+  let workflowPrefersOpus = commandPreferOpus;
+  if (workflowState) {
+    const activeWfForModel = getWorkflow(workflowState.workflowId);
+    if (activeWfForModel?.preferOpus) workflowPrefersOpus = true;
+  }
+  if (workflowPrefersOpus && modelPreference === 'auto' && routingDecision.model !== 'opus') {
+    routingDecision.model = 'opus';
+    routingDecision.reason = 'Deep coaching mode — using Opus for fuller analysis';
+  }
 
   // Build combined activity context with Promptly context
   let combinedActivityContext = activityContext;
@@ -1478,6 +1492,7 @@ interface CommandOutcome {
   claudeDirective: string | null;
   commandContext: string | null;
   forcedTitle: string | null;
+  preferOpus: boolean;
 }
 
 /**
@@ -1505,6 +1520,7 @@ async function handleSlashCommand(
       claudeDirective: null,
       commandContext: null,
       forcedTitle: null,
+      preferOpus: false,
     };
   };
 
@@ -1539,6 +1555,7 @@ async function handleSlashCommand(
         : `(I'm ready for the next step of the ${wf.label} workflow.)`,
       commandContext: null,
       forcedTitle: null,
+      preferOpus: false,
     };
   }
 
@@ -1555,6 +1572,7 @@ async function handleSlashCommand(
       claudeDirective: `(Let's step back to the previous step of the ${wf.label} workflow.)`,
       commandContext: null,
       forcedTitle: null,
+      preferOpus: false,
     };
   }
 
@@ -1569,6 +1587,7 @@ async function handleSlashCommand(
       claudeDirective: `(Run the ${promptCmd.label} mode.${forcedTitle ? ` Focus on "${forcedTitle}".` : ''})`,
       commandContext: buildPromptCommandContext(promptCmd, forcedTitle),
       forcedTitle,
+      preferOpus: !!promptCmd.preferOpus,
     };
   }
 
@@ -1601,6 +1620,7 @@ async function handleSlashCommand(
     claudeDirective: `(Begin the ${wf.label} workflow.${state.targetPieceTitle ? ` We're working on "${state.targetPieceTitle}".` : ''})`,
     commandContext: null,
     forcedTitle: null,
+    preferOpus: false,
   };
 }
 

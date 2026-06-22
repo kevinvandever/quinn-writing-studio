@@ -7,6 +7,7 @@
 
 import Parser from 'rss-parser';
 import { query } from '../db/connection.js';
+import { decrypt } from '../utils/encryption.js';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -68,6 +69,26 @@ function stripHtml(html: string): string {
  */
 function countWords(text: string): number {
   return text.split(/\s+/).filter((w) => w.length > 0).length;
+}
+
+/**
+ * Decrypt a stored auth-cookie value. Encrypted values are "iv:authTag:cipher"
+ * (hex); legacy values were stored as raw cookie strings, so those are passed
+ * through unchanged for backward compatibility.
+ */
+function decryptAuthCookies(stored: string): string {
+  const parts = stored.split(':');
+  const looksEncrypted =
+    parts.length === 3 &&
+    /^[0-9a-f]{24}$/i.test(parts[0]!) &&
+    /^[0-9a-f]{32}$/i.test(parts[1]!) &&
+    /^[0-9a-f]+$/i.test(parts[2]!);
+  if (!looksEncrypted) return stored;
+  try {
+    return decrypt(stored);
+  } catch {
+    return stored;
+  }
 }
 
 /**
@@ -180,14 +201,16 @@ export async function syncSubstackPosts(
   // Optionally fetch drafts if auth cookies are available
   if (connection.auth_cookies) {
     try {
-      const drafts = await fetchDrafts(connection.publication_url, connection.auth_cookies);
+      const cookies = decryptAuthCookies(connection.auth_cookies);
+      const drafts = await fetchDrafts(connection.publication_url, cookies);
       posts = [...posts, ...drafts];
     } catch (err) {
       errors.push('Failed to fetch drafts (non-critical)');
     }
   }
 
-  // Store new posts as corpus documents
+  // Store new posts as corpus documents; refresh existing ones (drafts change
+  // between syncs, so we update content rather than skipping).
   let newPostCount = 0;
 
   for (const post of posts) {
@@ -198,26 +221,21 @@ export async function syncSubstackPosts(
       [connection.project_id, post.guid]
     );
 
+    const metadata = JSON.stringify({
+      published_at: post.publishedAt.toISOString(),
+      url: post.url,
+    });
+
     if (existing.rows.length === 0) {
       // Insert new corpus document
       await query(
         `INSERT INTO corpus_documents (project_id, source_type, source_id, title, content, word_count, metadata)
          VALUES ($1, 'substack', $2, $3, $4, $5, $6)`,
-        [
-          connection.project_id,
-          post.guid,
-          post.title,
-          post.content,
-          post.wordCount,
-          JSON.stringify({
-            published_at: post.publishedAt.toISOString(),
-            url: post.url,
-          }),
-        ]
+        [connection.project_id, post.guid, post.title, post.content, post.wordCount, metadata]
       );
       newPostCount++;
 
-      // Log activity event for new published posts
+      // Log activity event for new items
       await query(
         `INSERT INTO activity_events (user_id, project_id, event_type, metadata)
          VALUES ($1, $2, 'substack_publish', $3)`,
@@ -231,6 +249,14 @@ export async function syncSubstackPosts(
             url: post.url,
           }),
         ]
+      );
+    } else {
+      // Refresh existing document so edited drafts/posts stay current
+      await query(
+        `UPDATE corpus_documents
+         SET title = $1, content = $2, word_count = $3, metadata = COALESCE(metadata, '{}'::jsonb) || $4::jsonb, updated_at = NOW()
+         WHERE id = $5`,
+        [post.title, post.content, post.wordCount, metadata, existing.rows[0]!.id]
       );
     }
   }

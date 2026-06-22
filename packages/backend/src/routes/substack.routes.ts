@@ -10,6 +10,7 @@ import { requireAuth } from '../middleware/auth.middleware.js';
 import { asyncHandler } from '../middleware/async-handler.js';
 import { AppError, ErrorCodes } from '../middleware/error-handler.middleware.js';
 import { syncSubstackPosts, type SubstackConnection } from '../services/substack-sync.service.js';
+import { encrypt } from '../utils/encryption.js';
 
 const router = Router();
 
@@ -50,14 +51,19 @@ router.post('/', asyncHandler(async (req: Request, res: Response) => {
 
   let connection;
 
+  // The auth cookie is a live session token — encrypt it at rest. When the
+  // field is left blank on an update, preserve the existing cookie rather than
+  // wiping draft access (the UI never pre-fills it for security).
+  const encryptedCookies = auth_cookies ? encrypt(auth_cookies) : null;
+
   if (existing.rows.length > 0) {
-    // Update existing connection
+    // Update existing connection (COALESCE keeps the stored cookie if none given)
     const result = await query<SubstackConnection>(
       `UPDATE substack_connections
-       SET publication_url = $1, publication_name = $2, auth_cookies = $3
+       SET publication_url = $1, publication_name = $2, auth_cookies = COALESCE($3, auth_cookies)
        WHERE project_id = $4
        RETURNING id, project_id, publication_url, publication_name, last_sync_at, sync_status, sync_error`,
-      [publication_url, publication_name || null, auth_cookies || null, project_id]
+      [publication_url, publication_name || null, encryptedCookies, project_id]
     );
     connection = result.rows[0];
   } else {
@@ -66,7 +72,7 @@ router.post('/', asyncHandler(async (req: Request, res: Response) => {
       `INSERT INTO substack_connections (project_id, publication_url, publication_name, auth_cookies)
        VALUES ($1, $2, $3, $4)
        RETURNING id, project_id, publication_url, publication_name, last_sync_at, sync_status, sync_error`,
-      [project_id, publication_url, publication_name || null, auth_cookies || null]
+      [project_id, publication_url, publication_name || null, encryptedCookies]
     );
     connection = result.rows[0];
   }

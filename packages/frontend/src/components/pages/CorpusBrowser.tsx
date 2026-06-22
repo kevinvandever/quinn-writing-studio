@@ -2,7 +2,6 @@ import { useParams } from 'react-router-dom';
 import { CorpusBrowser as ScrivenerCorpusBrowser } from '../corpus/CorpusBrowser';
 import { SubstackSettings } from '../settings/SubstackSettings';
 import { ProjectBriefEditor } from '../projects/ProjectBriefEditor';
-import { DraftUploader } from '../projects/DraftUploader';
 import { useProjectStore } from '../../stores/projectStore';
 
 /**
@@ -30,7 +29,6 @@ export function CorpusBrowser() {
       <div className="max-w-2xl mx-auto">
         <ProjectBriefEditor project={project} />
         <SubstackSettings projectId={project.id} projectName={project.name} />
-        <DraftUploader projectId={project.id} />
       </div>
     );
   }

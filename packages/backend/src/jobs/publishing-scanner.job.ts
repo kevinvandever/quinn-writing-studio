@@ -4,6 +4,7 @@ import {
   processIntelligenceItems,
   type RawIntelligenceItem,
 } from '../services/intelligence.service.js';
+import { youSearch, isYouSearchEnabled } from '../services/you-search.service.js';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -36,6 +37,18 @@ const DEFAULT_PUBLISHING_SOURCES: PublishingSource[] = [
     url: 'https://www.thereviewreview.net/feed/',
     type: 'rss',
   },
+];
+
+// ─── You.com Search Queries ──────────────────────────────────────────────────
+// Industry RSS feeds report *news*; they rarely list individual journals' open
+// reading periods. These web searches surface actual places to submit — the
+// currency that matters for placing essays ahead of a book query.
+
+const DEFAULT_YOU_SEARCH_QUERIES = [
+  'literary magazines open for submissions personal essay creative nonfiction',
+  'literary journal open reading period memoir submissions',
+  'call for submissions essays anthology creative nonfiction deadline',
+  'creative nonfiction essay contest deadline submissions',
 ];
 
 // ─── Publishing Relevance Keywords ──────────────────────────────────────────
@@ -106,6 +119,21 @@ export async function runPublishingScanner(userId: string): Promise<number> {
     }
   }
 
+  // Web search via you.com (if configured) — surfaces open submission calls and
+  // reading periods that never appear in the industry RSS feeds.
+  if (isYouSearchEnabled()) {
+    const queries = await getYouSearchQueries(userId);
+    for (const q of queries) {
+      try {
+        const items = await fetchFromYouSearch(q);
+        allItems.push(...items);
+        console.log(`[PublishingScanner] you.com "${q.slice(0, 40)}...": ${items.length} results`);
+      } catch (error) {
+        console.error(`[PublishingScanner] you.com search error for "${q}":`, error);
+      }
+    }
+  }
+
   // Filter for publishing relevance
   const relevantItems = filterForRelevance(allItems);
   console.log(`[PublishingScanner] ${relevantItems.length}/${allItems.length} items passed relevance filter`);
@@ -115,6 +143,51 @@ export async function runPublishingScanner(userId: string): Promise<number> {
   console.log(`[PublishingScanner] Completed. Stored ${storedCount} new publishing items.`);
 
   return storedCount;
+}
+
+/**
+ * Fetch publishing opportunities from a you.com web search query.
+ * Maps each search result into a RawIntelligenceItem for the pipeline.
+ */
+async function fetchFromYouSearch(searchQuery: string): Promise<RawIntelligenceItem[]> {
+  const results = await youSearch(searchQuery, { count: 15, freshness: 'month' });
+
+  return results.map((r) => {
+    const content = [r.description, ...r.snippets].filter(Boolean).join(' ');
+    return {
+      title: r.title,
+      source: r.url,
+      sourceName: 'you.com search',
+      content,
+      publishedAt: r.pageAge ? new Date(r.pageAge) : undefined,
+      deadline: extractDeadline(content, r.title),
+      subcategory: categorizePublishingItem(r.title, content),
+    };
+  });
+}
+
+/**
+ * Get configured you.com search queries from settings, or defaults.
+ */
+async function getYouSearchQueries(userId: string): Promise<string[]> {
+  try {
+    const result = await query<{ intelligence_schedules: Record<string, unknown> | null }>(
+      `SELECT intelligence_schedules FROM settings WHERE user_id = $1`,
+      [userId]
+    );
+    const schedules = result.rows[0]?.intelligence_schedules;
+    if (schedules && typeof schedules === 'object') {
+      const queries = (schedules as Record<string, unknown>)['publishing_search_queries'] as
+        | string[]
+        | undefined;
+      if (queries && Array.isArray(queries) && queries.length > 0) {
+        return queries;
+      }
+    }
+  } catch (error) {
+    console.error('[PublishingScanner] Error loading you.com queries:', error);
+  }
+  return DEFAULT_YOU_SEARCH_QUERIES;
 }
 
 /**

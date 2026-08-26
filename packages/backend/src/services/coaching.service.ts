@@ -18,6 +18,12 @@ import { logApiUsage } from './usage-tracking.service.js';
 import { getRecentActivitySummary } from './activity.service.js';
 import { ensureCorpusSummaries } from './corpus-summary.service.js';
 import {
+  setEarmark,
+  loadEarmarkedPieces,
+  detectFirstRightsConflicts,
+  buildFirstRightsContext,
+} from './submission-tracking.service.js';
+import {
   getWorkflow,
   getPromptCommand,
   workflowsForProjectType,
@@ -334,6 +340,8 @@ export async function sendSessionMessage(
     const outcome = await handleSlashCommand(
       res,
       sessionId,
+      session.project_id,
+      userId,
       project.project_type,
       priorWorkflowState,
       content
@@ -510,6 +518,22 @@ export async function sendSessionMessage(
       : promptlyContext;
   }
 
+  // First-publication rights: pieces reserved for journal submission, plus any
+  // apparent Substack collisions. Null when nothing is earmarked.
+  let firstRightsContext: string | null = null;
+  try {
+    const earmarkedPieces = await loadEarmarkedPieces(session.project_id);
+    if (earmarkedPieces.length > 0) {
+      const conflicts = await detectFirstRightsConflicts(userId, session.project_id);
+      firstRightsContext = buildFirstRightsContext(earmarkedPieces, conflicts);
+    }
+  } catch (err) {
+    console.warn(
+      '[Coaching] First-rights check failed:',
+      err instanceof Error ? err.message : err
+    );
+  }
+
   // Build the active-workflow system section (if a workflow is running).
   let workflowContext: string | null = null;
   if (workflowState) {
@@ -528,6 +552,7 @@ export async function sendSessionMessage(
       description: project.description,
     },
     manuscriptMap,
+    firstRightsContext,
     workflowContext,
     commandContext,
     sessionHistories: sessionSummaries,
@@ -940,6 +965,8 @@ interface CorpusNode {
   isFolder: boolean;
   scrivenerType: string | null;
   summary: string | null;
+  /** Reserved for literary journal submission — must not be published on Substack. */
+  earmarked: boolean;
   sortOrder: number;
   children: CorpusNode[];
 }
@@ -977,7 +1004,11 @@ async function loadManuscriptMap(projectId: string): Promise<string | null> {
     parent_id: string | null;
     sort_order: number | null;
     is_folder: boolean;
-    metadata: { scrivenerType?: string | null; summary?: string | null } | null;
+    metadata: {
+      scrivenerType?: string | null;
+      summary?: string | null;
+      submissionStatus?: string | null;
+    } | null;
   }>(
     `SELECT id, title, word_count, parent_id, sort_order, is_folder, metadata
      FROM corpus_documents
@@ -1001,6 +1032,7 @@ async function loadManuscriptMap(projectId: string): Promise<string | null> {
       isFolder: row.is_folder,
       scrivenerType: row.metadata?.scrivenerType ?? null,
       summary: row.metadata?.summary ?? null,
+      earmarked: row.metadata?.submissionStatus === 'earmarked',
       sortOrder: row.sort_order ?? 0,
       children: [],
     });
@@ -1069,7 +1101,8 @@ async function loadManuscriptMap(projectId: string): Promise<string | null> {
         const pieces = countDocsUnder(node);
         line = `${indent}${node.title}/${roleTag} — ${pieces} piece${pieces === 1 ? '' : 's'}, ${node.wordCount.toLocaleString()} words`;
       } else {
-        line = `${indent}${node.title} — ${node.wordCount.toLocaleString()} words`;
+        const earmarkTag = node.earmarked ? ' [RESERVED FOR JOURNAL SUBMISSION]' : '';
+        line = `${indent}${node.title} — ${node.wordCount.toLocaleString()} words${earmarkTag}`;
       }
       lines.push(line);
       renderedChars += line.length + 1;
@@ -1442,6 +1475,11 @@ function buildHelpMenu(projectType: string | null, state: WorkflowState | null):
     lines.push('');
   }
 
+  lines.push('Submission rights:');
+  lines.push('  /earmark [piece]    —  Reserve a piece for literary journal submission');
+  lines.push('  /unearmark [piece]  —  Release a reserved piece');
+  lines.push('  /earmarked          —  List reserved pieces and any Substack conflicts');
+  lines.push('');
   lines.push('Inside a workflow:  /next (advance)  ·  /back (previous step)  ·  /exit (leave)');
   lines.push('');
   if (state) {
@@ -1512,6 +1550,8 @@ interface CommandOutcome {
 async function handleSlashCommand(
   res: Response,
   sessionId: string,
+  projectId: string,
+  userId: string,
   projectType: string | null,
   priorState: WorkflowState | null,
   rawContent: string
@@ -1536,6 +1576,53 @@ async function handleSlashCommand(
 
   if (cmd === 'help' || cmd === 'workflows' || cmd === 'commands' || cmd === '?') {
     return replyStatic(buildHelpMenu(projectType, priorState));
+  }
+
+  // ── First-publication rights: reserve pieces for journal submission ──────
+  if (cmd === 'earmark' || cmd === 'unearmark') {
+    const pieceTitle = restTokens.join(' ').trim();
+    if (!pieceTitle) {
+      return replyStatic(
+        `Name the piece — e.g. /${cmd} Fenway. Use /earmarked to see what's currently reserved.`
+      );
+    }
+    const earmarking = cmd === 'earmark';
+    const resolved = await setEarmark(projectId, pieceTitle, earmarking);
+    if (!resolved) {
+      return replyStatic(
+        `I couldn't find a single piece matching "${pieceTitle}" in this project. Try the exact title as it appears in the binder.`
+      );
+    }
+    return replyStatic(
+      earmarking
+        ? `Reserved "${resolved}" for journal submission. I'll keep it out of newsletter suggestions and flag anything that would burn its first-publication rights.`
+        : `Released "${resolved}" — it's no longer reserved for journal submission.`
+    );
+  }
+
+  if (cmd === 'earmarked' || cmd === 'reserved') {
+    const pieces = await loadEarmarkedPieces(projectId);
+    if (pieces.length === 0) {
+      return replyStatic(
+        'Nothing is reserved for journal submission yet. Use /earmark <title> to reserve a piece — I\'ll then keep it out of newsletter suggestions and warn if it looks published.'
+      );
+    }
+    const conflicts = await detectFirstRightsConflicts(userId, projectId);
+    const lines = [
+      'Reserved for journal submission:',
+      ...pieces.map((p) => `  - ${p.title} (${p.wordCount.toLocaleString()} words)`),
+    ];
+    if (conflicts.length > 0) {
+      lines.push('', 'Possible first-rights conflicts (already on Substack):');
+      for (const c of conflicts) {
+        lines.push(
+          `  - "${c.essayTitle}" ↔ Substack post "${c.substackTitle}" (${
+            c.matchKind === 'title' ? 'same title' : 'overlapping text'
+          })`
+        );
+      }
+    }
+    return replyStatic(lines.join('\n'));
   }
 
   if (cmd === 'exit' || cmd === 'stop') {

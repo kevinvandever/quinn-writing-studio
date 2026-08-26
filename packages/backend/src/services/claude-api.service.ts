@@ -411,6 +411,7 @@ export interface AssemblePromptOptions {
   personaConfig: Record<string, unknown>;
   projectContext: ProjectContext;
   manuscriptMap: string | null;
+  firstRightsContext: string | null;
   workflowContext: string | null;
   commandContext: string | null;
   sessionHistories: SessionSummary[];
@@ -448,6 +449,7 @@ export function assembleSystemPrompt(options: AssemblePromptOptions): string {
     personaConfig,
     projectContext,
     manuscriptMap,
+    firstRightsContext,
     workflowContext,
     commandContext,
     sessionHistories,
@@ -486,6 +488,13 @@ export function assembleSystemPrompt(options: AssemblePromptOptions): string {
   // 3. Project context
   const projectSection = buildProjectSection(projectContext);
   sections.push(projectSection);
+
+  // 3a. First-publication rights — pieces reserved for journal submission, and
+  // any apparent Substack collisions. Placed before the map so the constraint is
+  // read before Quinn reasons about the manuscript.
+  if (firstRightsContext) {
+    sections.push(firstRightsContext);
+  }
 
   // 3b. Manuscript structure map (full Scrivener binder — always included so
   // Quinn knows everything that exists and where, regardless of corpus excerpts)

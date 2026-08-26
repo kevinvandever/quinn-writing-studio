@@ -55,11 +55,20 @@ app.use(express.json({ limit: '10mb' }));
 // Cookie parsing
 app.use(cookieParser());
 
-// Health check - basic liveness
+// Health check - basic liveness.
+// Also reports the deployed commit so it's possible to verify WHICH build is
+// live. Railway injects RAILWAY_GIT_COMMIT_SHA at build time; without this
+// there's no way to tell a stale deploy from a code problem.
+const PROCESS_STARTED_AT = new Date().toISOString();
+
 app.get('/api/health', (_req, res) => {
+  const commit = process.env['RAILWAY_GIT_COMMIT_SHA'] ?? null;
   res.json({
     status: 'ok',
     timestamp: new Date().toISOString(),
+    commit: commit ? commit.slice(0, 7) : 'unknown',
+    branch: process.env['RAILWAY_GIT_BRANCH'] ?? null,
+    startedAt: PROCESS_STARTED_AT,
   });
 });
 

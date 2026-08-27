@@ -24,6 +24,7 @@ interface UsageResponse {
 export function UsageDashboard() {
   const [usage, setUsage] = useState<UsageSummary | null>(null);
   const [isLoading, setIsLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
   const [period, setPeriod] = useState<'week' | 'month' | 'quarter'>('month');
 
   useEffect(() => {
@@ -33,23 +34,12 @@ export function UsageDashboard() {
   async function loadUsage() {
     try {
       setIsLoading(true);
-      const data = await get<UsageResponse>(`/api/activity?period=${period}`);
-      // Transform activity data into usage format
-      // For now, use mock structure since usage endpoint may not exist yet
-      setUsage(data.usage || {
-        totalCost: 0,
-        byModel: {},
-        byFeature: {},
-        daily: [],
-      });
-    } catch {
-      // Use empty data on error
-      setUsage({
-        totalCost: 0,
-        byModel: {},
-        byFeature: {},
-        daily: [],
-      });
+      setError(null);
+      const data = await get<UsageResponse>(`/api/usage?period=${period}`);
+      setUsage(data.usage);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to load usage');
+      setUsage({ totalCost: 0, byModel: {}, byFeature: {}, daily: [] });
     } finally {
       setIsLoading(false);
     }
@@ -69,6 +59,12 @@ export function UsageDashboard() {
 
   return (
     <div className="space-y-6">
+      {error && (
+        <div className="rounded-lg bg-red-50 border border-red-200 p-3 text-red-800 text-sm">
+          {error}
+        </div>
+      )}
+
       <div className="flex items-center justify-between">
         <h3 className="text-lg font-semibold text-gray-900">API Usage</h3>
         <div className="flex gap-1 bg-gray-100 rounded-lg p-0.5">

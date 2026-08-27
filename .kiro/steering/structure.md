@@ -54,7 +54,7 @@ quinn-writing-studio/
 │       │   ├── main.tsx                 # React entry point
 │       │   ├── index.css                # TailwindCSS imports
 │       │   ├── components/
-│       │   │   ├── layout/              # AppShell (+ ProjectSwitcher — ORPHANED, see note below)
+│       │   │   ├── layout/              # AppShell
 │       │   │   ├── auth/                # AuthGate, LoginForm
 │       │   │   ├── pages/               # Route targets — SOMETIMES thin wrappers, sometimes the whole UI
 │       │   │   ├── coaching/            # CoachingWorkspace, MessageBubble, StreamingResponse
@@ -66,8 +66,7 @@ quinn-writing-studio/
 │       │   │   ├── accountability/      # GoalTracker, ActivityDashboard
 │       │   │   ├── themes/              # ThemeMap, connection explorer
 │       │   │   ├── notifications/       # NotificationCenter (nudges overlay)
-│       │   │   └── settings/            # SettingsPanel, PersonaEditor, SubstackSettings
-│       │   │                            #   (+ UsageDashboard — ORPHANED, see note below)
+│       │   │   └── settings/            # SettingsPanel, PersonaEditor, SubstackSettings, UsageDashboard
 │       │   ├── services/
 │       │   │   ├── api-client.ts        # HTTP client with auth handling
 │       │   │   └── sse-client.ts        # Server-Sent Events for streaming
@@ -91,15 +90,22 @@ section in `tech.md` for the path.
 - **Backend services**: Business logic in `{domain}.service.ts`. Routes call services, services call DB/external APIs.
 - **Frontend pages**: `components/pages/` holds the components the router actually renders. The pattern is INCONSISTENT — some are thin wrappers that delegate to a feature folder (e.g. `pages/CorpusBrowser.tsx` renders `corpus/CorpusBrowser.tsx`), while others contain the entire UI themselves (e.g. `pages/IntelligenceFeed.tsx`). **Before editing any frontend component, verify it is actually imported** (`grep -rn "ComponentName" src/`). Two files can share a name, and the one in the feature folder may be dead. Editing an unreferenced component produces a successful build and deploy with no visible change — a genuinely confusing failure mode.
 
-### Known orphaned components (built, never wired up)
+### Orphaned components
 
-Nothing imports these; they are not reachable in the app. Do not treat them as live architecture:
-- `components/layout/ProjectSwitcher.tsx`
-- `components/settings/UsageDashboard.tsx` (calls `/api/activity`, so it largely duplicates `accountability/ActivityDashboard.tsx`)
+As of the last audit there are **none** — every component under `components/` is
+reachable. Three were found and resolved: `intelligence/IntelligenceFeed.tsx` and
+`layout/ProjectSwitcher.tsx` were deleted, and `settings/UsageDashboard.tsx` was
+wired into `settings/SettingsPanel.tsx` against the new `/api/usage` endpoint.
 
-To find orphans:
+Before editing a component, confirm something imports it:
 ```bash
 grep -rn "ComponentName" packages/frontend/src/   # no import = orphaned
+```
+
+After a frontend change, confirm the new string actually reached the bundle —
+this catches editing-dead-code, which otherwise builds and deploys silently:
+```bash
+npm run build -w @quinn/frontend && grep -ro "Your New String" packages/frontend/dist/assets/ | head
 ```
 - **Frontend components**: Organized by feature domain (coaching, corpus, capture, etc.), not by component type.
 - **API pattern**: REST with JSON. SSE for streaming Claude responses during coaching sessions.

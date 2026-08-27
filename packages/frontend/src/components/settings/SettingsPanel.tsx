@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { get, put, post } from '../../services/api-client';
 import { PersonaEditor } from './PersonaEditor';
+import { UsageDashboard } from './UsageDashboard';
 
 interface Settings {
   anthropic_api_key_set: boolean;
@@ -366,6 +367,11 @@ export function SettingsPanel() {
         >
           {isSaving ? 'Saving...' : 'Save Schedules'}
         </button>
+      </section>
+
+      {/* API Usage & Cost */}
+      <section className="bg-white rounded-lg border border-gray-200 p-6">
+        <UsageDashboard />
       </section>
 
       {/* Persona Editor */}

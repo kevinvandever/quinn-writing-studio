@@ -86,7 +86,22 @@ It is NOT a full backend `.env` and cannot run the backend. The watcher detects 
 
 ### BMAD origins
 
-Quinn began as a BMAD agent (Breakthrough Method for Agile AI-Driven Development). Her **persona** (voice, principles, Sedaris craft, ethics) was ported into the app and is seeded in `packages/backend/src/db/seed-kevin.ts`. Her BMAD **command menu and process** were re-implemented in-app in `packages/backend/src/services/coaching-workflows.ts` (workflows: /essay-triage, /editorial-pass; prompt modes: /analyze, /central-question, /coach, /progress, /checkin).
+Quinn began as a BMAD agent (Breakthrough Method for Agile AI-Driven Development). Her **persona** (voice, principles, Sedaris craft, ethics) was ported into the app and is seeded in `packages/backend/src/db/seed-kevin.ts`. Her BMAD **command menu and process** were re-implemented in-app.
+
+### Coaching commands — where they live
+
+Commands are typed into the coaching chat input (there is no separate palette). They are defined in **two** places, which matters when adding or changing one:
+
+1. **`services/coaching-workflows.ts`** — the registry, and the source of truth for anything that drives the model:
+   - *Workflows* (multi-step, step-gated): `/essay-triage` (Plan Collection), `/editorial-pass` (Review Essay)
+   - *Prompt modes* (single-shot): `/analyze`, `/central-question`, `/submission-ready`, `/place-this`, `/coach`, `/progress`, `/checkin`
+   - Flags per entry: `projectTypes` (availability), `targetsSinglePiece` (forces full text), `preferOpus` (model routing), `includePublishingOpportunities` (injects Intelligence feed items)
+
+2. **`services/coaching.service.ts` → `handleSlashCommand()`** — built-in commands that need DB writes or a static reply, so they are NOT in the registry:
+   - `/help`, `/next`, `/back`, `/exit`
+   - `/earmark`, `/unearmark`, `/earmarked` (first-publication rights)
+
+`/help` renders the registry dynamically, so registry additions appear automatically — but built-ins added in `handleSlashCommand` must also be added to `buildHelpMenu()` by hand, or they stay undiscoverable. When adding a command, update this list too.
 
 The original BMAD agent definition lives OUTSIDE this repo at:
 `/Volumes/Kevin SSD/kev-dev/_bmad-output/bmb-creations/memoir-writing-coach/`

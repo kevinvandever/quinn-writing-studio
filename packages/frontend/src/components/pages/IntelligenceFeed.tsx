@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
-import { get, put } from '../../services/api-client';
+import { get, put, post } from '../../services/api-client';
 
 interface IntelligenceItem {
   id: string;
@@ -26,6 +26,16 @@ interface ItemsResponse {
 
 type Tab = 'grants' | 'ai-news' | 'publishing';
 
+/**
+ * Tab ids match the GET endpoints (/api/intelligence/ai-news), but the scan
+ * endpoint takes the DB category enum ('ai_news'), so map between them.
+ */
+const SCAN_CATEGORY: Record<Tab, string> = {
+  grants: 'grant',
+  'ai-news': 'ai_news',
+  publishing: 'publishing',
+};
+
 export function IntelligenceFeed() {
   const [activeTab, setActiveTab] = useState<Tab>('grants');
   const [items, setItems] = useState<IntelligenceItem[]>([]);
@@ -33,6 +43,8 @@ export function IntelligenceFeed() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [statusFilter, setStatusFilter] = useState<string>('');
+  const [scanning, setScanning] = useState(false);
+  const [scanMessage, setScanMessage] = useState<string | null>(null);
 
   const loadItems = useCallback(async () => {
     setLoading(true);
@@ -57,6 +69,29 @@ export function IntelligenceFeed() {
   useEffect(() => {
     loadItems();
   }, [loadItems]);
+
+  // Run the active tab's scanner now instead of waiting for its cron schedule.
+  // Hits multiple feeds and web searches, so it can take up to a minute.
+  const handleScanNow = useCallback(async () => {
+    setScanning(true);
+    setScanMessage('Scanning sources — this can take up to a minute...');
+    try {
+      const result = await post<{ category: string; storedCount: number }>(
+        '/api/intelligence/scan',
+        { category: SCAN_CATEGORY[activeTab] }
+      );
+      setScanMessage(
+        result.storedCount > 0
+          ? `Found ${result.storedCount} new item${result.storedCount === 1 ? '' : 's'}.`
+          : 'Scan complete — nothing new since the last run.'
+      );
+      await loadItems();
+    } catch (err) {
+      setScanMessage(err instanceof Error ? `Scan failed: ${err.message}` : 'Scan failed.');
+    } finally {
+      setScanning(false);
+    }
+  }, [activeTab, loadItems]);
 
   async function updateStatus(itemId: string, newStatus: string) {
     try {
@@ -117,7 +152,21 @@ export function IntelligenceFeed() {
           <option value="dismissed">Dismissed</option>
         </select>
         <span className="text-sm text-warm-400">{total} items</span>
+        <button
+          onClick={handleScanNow}
+          disabled={scanning}
+          className="ml-auto px-3 py-1.5 text-sm font-medium text-sage-700 bg-sage-100 rounded-lg border border-sage-200 hover:bg-sage-200 disabled:opacity-60 disabled:cursor-not-allowed transition-colors"
+          title="Run this scanner now instead of waiting for its schedule"
+        >
+          {scanning ? 'Scanning...' : 'Scan now'}
+        </button>
       </div>
+
+      {scanMessage && (
+        <p className="text-sm text-ink-muted" role="status">
+          {scanMessage}
+        </p>
+      )}
 
       {/* Error */}
       {error && (

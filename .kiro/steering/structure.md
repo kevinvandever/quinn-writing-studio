@@ -18,8 +18,11 @@ quinn-writing-studio/
 │   │   │   │   └── rate-limit.middleware.ts     # Redis-backed rate limiting
 │   │   │   ├── routes/                  # One file per domain (auth, projects, sessions, etc.)
 │   │   │   ├── services/               # Business logic layer
-│   │   │   │   ├── claude-api.service.ts        # Model routing + streaming
-│   │   │   │   ├── coaching.service.ts          # Session lifecycle
+│   │   │   │   ├── claude-api.service.ts        # Model routing + streaming + prompt assembly
+│   │   │   │   ├── coaching.service.ts          # Session lifecycle, manuscript map, slash commands
+│   │   │   │   ├── coaching-workflows.ts        # Workflow + prompt-command registry (BMAD menu)
+│   │   │   │   ├── corpus-summary.service.ts    # Per-document logline/theme index
+│   │   │   │   ├── submission-tracking.service.ts  # Earmarks, first-rights conflicts, opportunities
 │   │   │   │   ├── ethics.service.ts            # Writing ethics enforcement
 │   │   │   │   ├── scrivener-parser.service.ts  # .scriv import
 │   │   │   │   ├── substack-sync.service.ts     # RSS/API sync
@@ -51,19 +54,20 @@ quinn-writing-studio/
 │       │   ├── main.tsx                 # React entry point
 │       │   ├── index.css                # TailwindCSS imports
 │       │   ├── components/
-│       │   │   ├── layout/              # AppShell, Navigation, ProjectSwitcher
+│       │   │   ├── layout/              # AppShell (+ ProjectSwitcher — ORPHANED, see note below)
 │       │   │   ├── auth/                # AuthGate, LoginForm
-│       │   │   ├── pages/               # Page-level wrappers (thin, delegate to feature components)
+│       │   │   ├── pages/               # Route targets — SOMETIMES thin wrappers, sometimes the whole UI
 │       │   │   ├── coaching/            # CoachingWorkspace, MessageBubble, StreamingResponse
-│       │   │   ├── corpus/              # CorpusBrowser, document tree, upload
+│       │   │   ├── corpus/              # CorpusBrowser (feature impl), document tree, upload
+│       │   │   ├── projects/            # ProjectBriefEditor (project description Quinn reads)
 │       │   │   ├── drafts/              # DraftVersions, diff viewer
 │       │   │   ├── capture/             # QuickCapture, CaptureInbox
-│       │   │   ├── intelligence/        # IntelligenceFeed (grants, AI news, publishing tabs)
 │       │   │   ├── promptly/            # PromptlyQueue, content pipeline
 │       │   │   ├── accountability/      # GoalTracker, ActivityDashboard
 │       │   │   ├── themes/              # ThemeMap, connection explorer
 │       │   │   ├── notifications/       # NotificationCenter (nudges overlay)
-│       │   │   └── settings/            # SettingsPanel, PersonaEditor, SubstackSettings, UsageDashboard
+│       │   │   └── settings/            # SettingsPanel, PersonaEditor, SubstackSettings
+│       │   │                            #   (+ UsageDashboard — ORPHANED, see note below)
 │       │   ├── services/
 │       │   │   ├── api-client.ts        # HTTP client with auth handling
 │       │   │   └── sse-client.ts        # Server-Sent Events for streaming
@@ -73,16 +77,30 @@ quinn-writing-studio/
 │       ├── netlify.toml
 │       └── postcss.config.js
 │
-├── analysis/                            # Brainstorming and planning docs
-├── bmb-creations/                       # Agent definitions and sidecar configs
-└── implementation-artifacts/            # (empty, for future use)
+└── README.md
+
+Note: earlier versions of this doc listed `analysis/`, `bmb-creations/`, and
+`implementation-artifacts/` at the repo root. They are NOT in the working tree.
+The original BMAD agent definitions live outside this repo — see the BMAD origins
+section in `tech.md` for the path.
 ```
 
 ## Conventions
 
 - **Backend routes**: One file per domain, named `{domain}.routes.ts`. Mounted under `/api/` prefix in `server.ts`.
 - **Backend services**: Business logic in `{domain}.service.ts`. Routes call services, services call DB/external APIs.
-- **Frontend pages**: Thin wrappers in `components/pages/` that render feature components from domain folders.
+- **Frontend pages**: `components/pages/` holds the components the router actually renders. The pattern is INCONSISTENT — some are thin wrappers that delegate to a feature folder (e.g. `pages/CorpusBrowser.tsx` renders `corpus/CorpusBrowser.tsx`), while others contain the entire UI themselves (e.g. `pages/IntelligenceFeed.tsx`). **Before editing any frontend component, verify it is actually imported** (`grep -rn "ComponentName" src/`). Two files can share a name, and the one in the feature folder may be dead. Editing an unreferenced component produces a successful build and deploy with no visible change — a genuinely confusing failure mode.
+
+### Known orphaned components (built, never wired up)
+
+Nothing imports these; they are not reachable in the app. Do not treat them as live architecture:
+- `components/layout/ProjectSwitcher.tsx`
+- `components/settings/UsageDashboard.tsx` (calls `/api/activity`, so it largely duplicates `accountability/ActivityDashboard.tsx`)
+
+To find orphans:
+```bash
+grep -rn "ComponentName" packages/frontend/src/   # no import = orphaned
+```
 - **Frontend components**: Organized by feature domain (coaching, corpus, capture, etc.), not by component type.
 - **API pattern**: REST with JSON. SSE for streaming Claude responses during coaching sessions.
 - **Migrations**: Sequential numbered files (`001_`, `002_`, etc.) in `src/db/migrations/`.

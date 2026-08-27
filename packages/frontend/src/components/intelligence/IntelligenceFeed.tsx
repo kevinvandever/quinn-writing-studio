@@ -36,6 +36,8 @@ export function IntelligenceFeed() {
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
   const [statusFilter, setStatusFilter] = useState<string>('');
+  const [scanning, setScanning] = useState(false);
+  const [scanMessage, setScanMessage] = useState<string | null>(null);
 
   const fetchItems = useCallback(async () => {
     setLoading(true);
@@ -50,6 +52,29 @@ export function IntelligenceFeed() {
       setLoading(false);
     }
   }, [activeTab, statusFilter]);
+
+  // Run the scanner for the active tab now, rather than waiting for its cron
+  // schedule. Scans hit several feeds and web searches, so this can take a while.
+  const handleScanNow = useCallback(async () => {
+    setScanning(true);
+    setScanMessage('Scanning sources — this can take up to a minute...');
+    try {
+      const result = await post<{ category: string; storedCount: number }>(
+        '/api/intelligence/scan',
+        { category: activeTab }
+      );
+      setScanMessage(
+        result.storedCount > 0
+          ? `Found ${result.storedCount} new item${result.storedCount === 1 ? '' : 's'}.`
+          : 'Scan complete — nothing new since the last run.'
+      );
+      await fetchItems();
+    } catch (err) {
+      setScanMessage(err instanceof Error ? `Scan failed: ${err.message}` : 'Scan failed.');
+    } finally {
+      setScanning(false);
+    }
+  }, [activeTab, fetchItems]);
 
   useEffect(() => {
     fetchItems();
@@ -122,7 +147,21 @@ export function IntelligenceFeed() {
           <option value="dismissed">Dismissed</option>
         </select>
         <span className="text-sm text-gray-500 ml-auto">{total} items</span>
+        <button
+          onClick={handleScanNow}
+          disabled={scanning}
+          className="text-sm font-medium px-3 py-1.5 rounded-md border border-indigo-200 bg-indigo-50 text-indigo-700 hover:bg-indigo-100 disabled:opacity-60 disabled:cursor-not-allowed transition-colors"
+          title="Run this scanner now instead of waiting for its schedule"
+        >
+          {scanning ? 'Scanning...' : 'Scan now'}
+        </button>
       </div>
+
+      {scanMessage && (
+        <p className="text-sm text-gray-600 mb-4" role="status">
+          {scanMessage}
+        </p>
+      )}
 
       {/* Content */}
       {loading ? (

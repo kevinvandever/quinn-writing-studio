@@ -57,6 +57,11 @@ export interface PromptCommand {
   targetsSinglePiece?: boolean;
   /** Prefer Opus for this mode when model routing is on auto. */
   preferOpus?: boolean;
+  /**
+   * Include publishing opportunities from the Intelligence feed in context, so
+   * suggestions point at real open calls rather than half-remembered journals.
+   */
+  includePublishingOpportunities?: boolean;
   /** One-turn instruction injected into the system prompt for the response. */
   instruction: string;
 }
@@ -162,6 +167,27 @@ const PROMPT_COMMANDS: PromptCommand[] = [
     preferOpus: true,
     instruction:
       `Assess whether the named piece serves this project's central question (stated in the Active Project section above). If the project has no stated central question, assess instead whether the piece serves the project's apparent purpose and themes. Be honest, specific, and compassionate: what in the piece speaks to it, what doesn't, and whether it earns its place. If it doesn't serve directly, consider whether it serves the collection another way. Flags and reasoning; the writer decides.`,
+  },
+  {
+    id: 'submission-ready',
+    aliases: ['sr', 'ready'],
+    label: 'Submission Ready',
+    description: 'Which pieces are strongest to send to journals right now, and why.',
+    preferOpus: true,
+    includePublishingOpportunities: true,
+    instruction:
+      `Identify which pieces are the strongest candidates to submit to literary journals right now. Work from the manuscript map (every piece, with word counts and loglines) and any full texts loaded. For each recommendation: name the piece, its word count, why it's ready (what's working, what makes it placeable), and any reservation. Rank them — the writer wants a shortlist to act on, not a survey of everything. Call out pieces that are close but need one specific revision first, and say what that revision is. Word count is a hard constraint at many journals, so state it for every candidate. If pieces are already reserved for submission (see First-Publication Rights, if present), account for that. Prefer specificity over encouragement: this list should be short enough to act on this week.`,
+  },
+  {
+    id: 'place-this',
+    aliases: ['place', 'pt'],
+    label: 'Place This Piece',
+    description: 'Best-fit journals for one piece, matched to live open calls. Name the piece.',
+    targetsSinglePiece: true,
+    preferOpus: true,
+    includePublishingOpportunities: true,
+    instruction:
+      `Recommend where to submit the named piece. Its full text should be loaded in the corpus context; if it isn't, ask the writer to name it and stop. Then: (1) characterize what the piece actually is — length, register, subject, what kind of venue it suits; (2) recommend specific journals, drawing FIRST on the Publishing Opportunities list if present (real open calls with deadlines), then on well-established venues for personal essay and creative nonfiction; (3) for each, say why this piece fits that venue and note the word-count fit explicitly, since limits disqualify more submissions than quality does. Give a mixed slate — a couple of reaches, a few mid-tier, one or two likely — because simultaneous submissions are standard. Never invent a reading period, deadline, fee, or word limit: if you aren't certain, say the writer must confirm on the journal's site. Close with a concrete next action.`,
   },
   {
     id: 'coach',

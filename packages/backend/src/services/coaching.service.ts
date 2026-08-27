@@ -22,6 +22,7 @@ import {
   loadEarmarkedPieces,
   detectFirstRightsConflicts,
   buildFirstRightsContext,
+  loadPublishingOpportunities,
 } from './submission-tracking.service.js';
 import {
   getWorkflow,
@@ -1678,11 +1679,27 @@ async function handleSlashCommand(
   if (promptCmd) {
     const arg = restTokens.join(' ').trim();
     const forcedTitle = promptCmd.targetsSinglePiece && arg ? arg : null;
+    let context = buildPromptCommandContext(promptCmd, forcedTitle);
+
+    // Submission-oriented modes get the live opportunity list so suggestions
+    // point at real open calls rather than half-remembered journals.
+    if (promptCmd.includePublishingOpportunities) {
+      try {
+        const opportunities = await loadPublishingOpportunities();
+        if (opportunities) context = `${context}\n\n${opportunities}`;
+      } catch (err) {
+        console.warn(
+          '[Coaching] Failed to load publishing opportunities:',
+          err instanceof Error ? err.message : err
+        );
+      }
+    }
+
     return {
       handledStatically: false,
       workflowState: priorState, // prompt commands don't change workflow state
       claudeDirective: `(Run the ${promptCmd.label} mode.${forcedTitle ? ` Focus on "${forcedTitle}".` : ''})`,
-      commandContext: buildPromptCommandContext(promptCmd, forcedTitle),
+      commandContext: context,
       forcedTitle,
       preferOpus: !!promptCmd.preferOpus,
     };

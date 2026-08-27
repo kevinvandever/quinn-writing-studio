@@ -221,3 +221,56 @@ export function buildFirstRightsContext(
 
   return lines.join('\n');
 }
+
+/**
+ * Load recent publishing opportunities discovered by the intelligence scanners,
+ * formatted for the coaching prompt. This is what connects the two halves of the
+ * submission workflow: the scanner finds open calls and reading periods, and
+ * Quinn matches the writer's essays against them.
+ *
+ * Prefers items with a future deadline and the submission/contest subcategories.
+ * Returns null when nothing relevant has been discovered yet.
+ */
+export async function loadPublishingOpportunities(limit = 25): Promise<string | null> {
+  const result = await query<{
+    title: string;
+    source_name: string | null;
+    source: string | null;
+    summary: string | null;
+    subcategory: string | null;
+    deadline: Date | null;
+  }>(
+    `SELECT title, source_name, source, summary, subcategory, deadline
+     FROM intelligence_items
+     WHERE category = 'publishing'
+       AND status <> 'dismissed'
+       AND (deadline IS NULL OR deadline >= CURRENT_DATE)
+     ORDER BY
+       CASE WHEN subcategory IN ('submission_window', 'contest_deadline') THEN 0 ELSE 1 END,
+       CASE WHEN deadline IS NOT NULL THEN 0 ELSE 1 END,
+       deadline ASC,
+       discovered_at DESC
+     LIMIT $1`,
+    [limit]
+  );
+
+  if (result.rows.length === 0) return null;
+
+  const lines = result.rows.map((r) => {
+    const parts = [`- ${r.title}`];
+    if (r.source_name) parts.push(`(${r.source_name})`);
+    if (r.deadline) parts.push(`— deadline ${new Date(r.deadline).toISOString().slice(0, 10)}`);
+    if (r.subcategory) parts.push(`[${r.subcategory}]`);
+    let line = parts.join(' ');
+    if (r.summary) line += `\n    ${r.summary.slice(0, 200)}`;
+    if (r.source) line += `\n    ${r.source}`;
+    return line;
+  });
+
+  return [
+    '## Publishing Opportunities Discovered (from the Intelligence feed)',
+    'These are real open calls, reading periods, and contest deadlines the scanners found. Prefer these over journals you recall from memory when making concrete suggestions, and cite the deadline and link when you point the writer at one. Treat details as unverified — tell the writer to confirm current guidelines on the journal\'s own site before submitting.',
+    '',
+    ...lines,
+  ].join('\n');
+}

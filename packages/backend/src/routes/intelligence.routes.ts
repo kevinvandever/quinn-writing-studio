@@ -169,6 +169,41 @@ intelligenceRouter.get('/publishing', asyncHandler(async (req: Request, res: Res
   });
 }));
 
+// ─── POST /api/intelligence/scan ─────────────────────────────────────────────
+
+/**
+ * Manually run a scanner now, instead of waiting for its cron schedule.
+ * Runs synchronously so the caller learns how many new items were stored —
+ * useful for verifying a source actually works.
+ */
+intelligenceRouter.post('/scan', asyncHandler(async (req: Request, res: Response) => {
+  const userId = req.user!.userId;
+  const { category } = req.body as { category?: string };
+
+  const validCategories = ['grant', 'ai_news', 'publishing'];
+  if (!category || !validCategories.includes(category)) {
+    throw new AppError(
+      400,
+      ErrorCodes.VALIDATION_ERROR,
+      `category must be one of: ${validCategories.join(', ')}`
+    );
+  }
+
+  let storedCount = 0;
+  if (category === 'grant') {
+    const { runGrantScanner } = await import('../jobs/grant-scanner.job.js');
+    storedCount = await runGrantScanner(userId);
+  } else if (category === 'ai_news') {
+    const { runAiNewsScanner } = await import('../jobs/ai-news-scanner.job.js');
+    storedCount = await runAiNewsScanner(userId);
+  } else {
+    const { runPublishingScanner } = await import('../jobs/publishing-scanner.job.js');
+    storedCount = await runPublishingScanner(userId);
+  }
+
+  res.json({ category, storedCount });
+}));
+
 // ─── GET /api/intelligence/config ────────────────────────────────────────────
 
 /**

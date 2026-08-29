@@ -5,6 +5,7 @@ import {
   type RawIntelligenceItem,
 } from '../services/intelligence.service.js';
 import { youSearch, isYouSearchEnabled } from '../services/you-search.service.js';
+import { venueSearchQueries, venueNamesLower } from '../services/target-venues.js';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -32,11 +33,8 @@ const DEFAULT_PUBLISHING_SOURCES: PublishingSource[] = [
     url: 'https://lithub.com/feed/',
     type: 'rss',
   },
-  {
-    name: 'The Review Review',
-    url: 'https://www.thereviewreview.net/feed/',
-    type: 'rss',
-  },
+  // Note: The Review Review was previously listed here but appears defunct
+  // (the site stopped publishing), so it was removed rather than fetched pointlessly.
 ];
 
 // ─── You.com Search Queries ──────────────────────────────────────────────────
@@ -44,40 +42,52 @@ const DEFAULT_PUBLISHING_SOURCES: PublishingSource[] = [
 // reading periods. These web searches surface actual places to submit — the
 // currency that matters for placing essays ahead of a book query.
 
-const DEFAULT_YOU_SEARCH_QUERIES = [
+// Generic discovery queries, plus one query per curated target venue (derived
+// from target-venues.ts) so the scanner tracks the writer's actual targets.
+const GENERIC_SEARCH_QUERIES = [
   'literary magazines open for submissions personal essay creative nonfiction',
   'literary journal open reading period memoir submissions',
-  'call for submissions essays anthology creative nonfiction deadline',
-  'creative nonfiction essay contest deadline submissions',
+  'call for submissions essays creative nonfiction deadline',
 ];
+
+function defaultSearchQueries(): string[] {
+  return [...GENERIC_SEARCH_QUERIES, ...venueSearchQueries()];
+}
 
 // ─── Publishing Relevance Keywords ──────────────────────────────────────────
 
-const PUBLISHING_KEYWORDS = [
-  'memoir',
-  'essay',
-  'creative nonfiction',
-  'nonfiction',
-  'literary',
-  'agent',
+// Relevance is a conjunction, not a single keyword hit: an item must show
+// SUBMISSION INTENT *and* be about this writer's GENRE. The previous filter
+// admitted anything containing 'essay', 'literary', or 'journal', which let
+// general book coverage flood the Publishing tab and buried actual openings.
+
+const SUBMISSION_INTENT_KEYWORDS = [
   'submission',
+  'submissions',
+  'submit',
+  'open reading',
+  'reading period',
+  'call for',
+  'accepting',
+  'guidelines',
+  'deadline',
   'contest',
   'prize',
   'award',
+  'competition',
   'anthology',
-  'literary magazine',
-  'journal',
-  'publisher',
-  'editor',
-  'manuscript',
-  'query',
-  'book deal',
-  'debut',
-  'personal essay',
-  'narrative nonfiction',
   'literary agent',
-  'open reading',
-  'call for submissions',
+];
+
+const GENRE_KEYWORDS = [
+  'memoir',
+  'essay',
+  'personal essay',
+  'creative nonfiction',
+  'narrative nonfiction',
+  'nonfiction',
+  'literary magazine',
+  'literary journal',
 ];
 
 // ─── Categorization Keywords ─────────────────────────────────────────────────
@@ -187,7 +197,7 @@ async function getYouSearchQueries(userId: string): Promise<string[]> {
   } catch (error) {
     console.error('[PublishingScanner] Error loading you.com queries:', error);
   }
-  return DEFAULT_YOU_SEARCH_QUERIES;
+  return defaultSearchQueries();
 }
 
 /**
@@ -256,9 +266,17 @@ async function fetchPublishingSource(source: PublishingSource): Promise<RawIntel
  * Filter items for relevance to memoir/essay/creative nonfiction publishing.
  */
 function filterForRelevance(items: RawIntelligenceItem[]): RawIntelligenceItem[] {
+  const venues = venueNamesLower();
+
   return items.filter((item) => {
     const searchText = `${item.title} ${item.content}`.toLowerCase();
-    return PUBLISHING_KEYWORDS.some((keyword) => searchText.includes(keyword));
+
+    // Anything about a curated target venue is relevant by definition.
+    if (venues.some((v) => searchText.includes(v))) return true;
+
+    const hasIntent = SUBMISSION_INTENT_KEYWORDS.some((k) => searchText.includes(k));
+    const hasGenre = GENRE_KEYWORDS.some((k) => searchText.includes(k));
+    return hasIntent && hasGenre;
   });
 }
 

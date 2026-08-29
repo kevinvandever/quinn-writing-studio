@@ -23,6 +23,7 @@ quinn-writing-studio/
 │   │   │   │   ├── coaching-workflows.ts        # Workflow + prompt-command registry (BMAD menu)
 │   │   │   │   ├── corpus-summary.service.ts    # Per-document logline/theme index
 │   │   │   │   ├── submission-tracking.service.ts  # Earmarks, first-rights conflicts, opportunities
+│   │   │   │   ├── target-venues.ts             # Curated journal shortlist (EDIT HERE to add venues)
 │   │   │   │   ├── ethics.service.ts            # Writing ethics enforcement
 │   │   │   │   ├── scrivener-parser.service.ts  # .scriv import
 │   │   │   │   ├── substack-sync.service.ts     # RSS/API sync

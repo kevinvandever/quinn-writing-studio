@@ -24,6 +24,7 @@ import {
   buildFirstRightsContext,
   loadPublishingOpportunities,
 } from './submission-tracking.service.js';
+import { buildTargetVenuesContext } from './target-venues.js';
 import {
   getWorkflow,
   getPromptCommand,
@@ -1681,9 +1682,11 @@ async function handleSlashCommand(
     const forcedTitle = promptCmd.targetsSinglePiece && arg ? arg : null;
     let context = buildPromptCommandContext(promptCmd, forcedTitle);
 
-    // Submission-oriented modes get the live opportunity list so suggestions
-    // point at real open calls rather than half-remembered journals.
+    // Submission-oriented modes get the writer's curated target venues plus the
+    // live opportunity list, so suggestions rest on a controlled shortlist and
+    // real open calls rather than half-remembered journals.
     if (promptCmd.includePublishingOpportunities) {
+      context = `${context}\n\n${buildTargetVenuesContext()}`;
       try {
         const opportunities = await loadPublishingOpportunities();
         if (opportunities) context = `${context}\n\n${opportunities}`;

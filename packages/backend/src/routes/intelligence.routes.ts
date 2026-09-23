@@ -25,6 +25,10 @@ intelligenceRouter.get('/grants', asyncHandler(async (req: Request, res: Respons
     whereClause += ` AND status = $${paramIdx}`;
     params.push(status);
     paramIdx++;
+  } else {
+    // No explicit status filter: hide dismissed items so the default view stays
+    // actionable. They remain reachable via the 'Dismissed' filter.
+    whereClause += ` AND status <> 'dismissed'`;
   }
 
   const countResult = await query<{ count: string }>(
@@ -69,6 +73,10 @@ intelligenceRouter.get('/ai-news', asyncHandler(async (req: Request, res: Respon
     whereClause += ` AND status = $${paramIdx}`;
     params.push(status);
     paramIdx++;
+  } else {
+    // No explicit status filter: hide dismissed items so the default view stays
+    // actionable. They remain reachable via the 'Dismissed' filter.
+    whereClause += ` AND status <> 'dismissed'`;
   }
 
   const countResult = await query<{ count: string }>(
@@ -121,6 +129,72 @@ intelligenceRouter.put('/ai-news/:id', asyncHandler(async (req: Request, res: Re
   res.json(result.rows[0]);
 }));
 
+// ─── PUT /api/intelligence/items/:id ─────────────────────────────────────────
+
+/**
+ * Update the status of any intelligence item, whatever its category.
+ * The older /ai-news/:id route is category-locked, which left publishing and
+ * writing-job items impossible to dismiss.
+ */
+intelligenceRouter.put('/items/:id', asyncHandler(async (req: Request, res: Response) => {
+  const { id } = req.params;
+  const { status } = req.body;
+
+  const validStatuses = ['new', 'reviewed', 'selected', 'saved', 'dismissed'];
+  if (!status || !validStatuses.includes(status)) {
+    throw new AppError(400, ErrorCodes.VALIDATION_ERROR, 'Invalid status');
+  }
+
+  const result = await query(
+    `UPDATE intelligence_items
+     SET status = $1, reviewed_at = NOW()
+     WHERE id = $2
+     RETURNING id, status`,
+    [status, id]
+  );
+
+  if (result.rows.length === 0) {
+    throw new AppError(404, ErrorCodes.NOT_FOUND, 'Intelligence item not found');
+  }
+
+  res.json(result.rows[0]);
+}));
+
+// ─── POST /api/intelligence/dismiss-expired ──────────────────────────────────
+
+/**
+ * Bulk-dismiss items whose deadline has passed. Optionally scoped to one
+ * category. Items with no deadline are never touched — an open reading period
+ * with no stated close date is still live.
+ */
+intelligenceRouter.post('/dismiss-expired', asyncHandler(async (req: Request, res: Response) => {
+  const { category } = req.body as { category?: string };
+
+  const validCategories = ['grant', 'ai_news', 'publishing', 'writing_jobs'];
+  const params: unknown[] = [];
+  let categoryClause = '';
+  if (category) {
+    if (!validCategories.includes(category)) {
+      throw new AppError(400, ErrorCodes.VALIDATION_ERROR, 'Invalid category');
+    }
+    categoryClause = ` AND category = $1`;
+    params.push(category);
+  }
+
+  const result = await query<{ id: string }>(
+    `UPDATE intelligence_items
+     SET status = 'dismissed', reviewed_at = NOW()
+     WHERE deadline IS NOT NULL
+       AND deadline < CURRENT_DATE
+       AND status <> 'dismissed'
+       ${categoryClause}
+     RETURNING id`,
+    params
+  );
+
+  res.json({ dismissedCount: result.rows.length });
+}));
+
 // ─── GET /api/intelligence/publishing ────────────────────────────────────────
 
 /**
@@ -137,6 +211,10 @@ intelligenceRouter.get('/publishing', asyncHandler(async (req: Request, res: Res
     whereClause += ` AND status = $${paramIdx}`;
     params.push(status);
     paramIdx++;
+  } else {
+    // No explicit status filter: hide dismissed items so the default view stays
+    // actionable. They remain reachable via the 'Dismissed' filter.
+    whereClause += ` AND status <> 'dismissed'`;
   }
 
   if (subcategory && typeof subcategory === 'string') {
@@ -183,6 +261,10 @@ intelligenceRouter.get('/writing-jobs', asyncHandler(async (req: Request, res: R
     whereClause += ` AND status = $${paramIdx}`;
     params.push(status);
     paramIdx++;
+  } else {
+    // No explicit status filter: hide dismissed items so the default view stays
+    // actionable. They remain reachable via the 'Dismissed' filter.
+    whereClause += ` AND status <> 'dismissed'`;
   }
 
   if (subcategory && typeof subcategory === 'string') {

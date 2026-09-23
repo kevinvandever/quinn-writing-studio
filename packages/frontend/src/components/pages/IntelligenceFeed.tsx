@@ -96,12 +96,32 @@ export function IntelligenceFeed() {
 
   async function updateStatus(itemId: string, newStatus: string) {
     try {
-      await put(`/api/intelligence/ai-news/${itemId}`, { status: newStatus });
+      // Category-agnostic endpoint — works for grants, publishing, and jobs too.
+      await put(`/api/intelligence/items/${itemId}`, { status: newStatus });
       await loadItems();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to update status');
     }
   }
+
+  /** Bulk-dismiss items in this tab whose deadline has already passed. */
+  const handleDismissExpired = useCallback(async () => {
+    setScanMessage(null);
+    try {
+      const result = await post<{ dismissedCount: number }>(
+        '/api/intelligence/dismiss-expired',
+        { category: SCAN_CATEGORY[activeTab] }
+      );
+      setScanMessage(
+        result.dismissedCount > 0
+          ? `Dismissed ${result.dismissedCount} expired item${result.dismissedCount === 1 ? '' : 's'}.`
+          : 'No expired items to clear.'
+      );
+      await loadItems();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to clear expired items');
+    }
+  }, [activeTab, loadItems]);
 
   const tabs: { key: Tab; label: string; icon: string }[] = [
     { key: 'grants', label: 'Grants', icon: '💰' },
@@ -146,7 +166,7 @@ export function IntelligenceFeed() {
           onChange={(e) => setStatusFilter(e.target.value)}
           className="rounded-lg border border-warm-300 bg-white px-3 py-1.5 text-sm text-ink focus:outline-none focus:ring-2 focus:ring-sage-400 focus:border-transparent"
         >
-          <option value="">All</option>
+          <option value="">Active (hides dismissed)</option>
           <option value="new">New</option>
           <option value="reviewed">Reviewed</option>
           <option value="selected">Selected</option>
@@ -155,9 +175,16 @@ export function IntelligenceFeed() {
         </select>
         <span className="text-sm text-warm-400">{total} items</span>
         <button
+          onClick={handleDismissExpired}
+          className="ml-auto px-3 py-1.5 text-sm font-medium text-warm-600 bg-warm-100 rounded-lg border border-warm-300 hover:bg-warm-200 transition-colors"
+          title="Dismiss items in this tab whose deadline has passed"
+        >
+          Clear expired
+        </button>
+        <button
           onClick={handleScanNow}
           disabled={scanning}
-          className="ml-auto px-3 py-1.5 text-sm font-medium text-sage-700 bg-sage-100 rounded-lg border border-sage-200 hover:bg-sage-200 disabled:opacity-60 disabled:cursor-not-allowed transition-colors"
+          className="px-3 py-1.5 text-sm font-medium text-sage-700 bg-sage-100 rounded-lg border border-sage-200 hover:bg-sage-200 disabled:opacity-60 disabled:cursor-not-allowed transition-colors"
           title="Run this scanner now instead of waiting for its schedule"
         >
           {scanning ? 'Scanning...' : 'Scan now'}
@@ -237,28 +264,44 @@ export function IntelligenceFeed() {
                   )}
                 </div>
 
-                {/* Actions */}
-                {activeTab === 'ai-news' && item.status === 'new' && (
+                {/* Actions — available on every tab, not just AI News */}
+                {item.status !== 'dismissed' && (
                   <div className="flex flex-col gap-1 flex-shrink-0">
-                    <button
-                      onClick={() => updateStatus(item.id, 'selected')}
-                      className="text-xs px-2.5 py-1 bg-green-50 text-green-700 rounded-md hover:bg-green-100 transition-colors"
-                    >
-                      Select
-                    </button>
-                    <button
-                      onClick={() => updateStatus(item.id, 'saved')}
-                      className="text-xs px-2.5 py-1 bg-amber-50 text-amber-800 rounded-md hover:bg-amber-100 transition-colors"
-                    >
-                      Save
-                    </button>
+                    {/* 'Select' feeds the Promptly writing queue, so it's AI-News only */}
+                    {activeTab === 'ai-news' && item.status === 'new' && (
+                      <button
+                        onClick={() => updateStatus(item.id, 'selected')}
+                        className="text-xs px-2.5 py-1 bg-green-50 text-green-700 rounded-md hover:bg-green-100 transition-colors"
+                      >
+                        Select
+                      </button>
+                    )}
+                    {item.status !== 'saved' && (
+                      <button
+                        onClick={() => updateStatus(item.id, 'saved')}
+                        className="text-xs px-2.5 py-1 bg-amber-50 text-amber-800 rounded-md hover:bg-amber-100 transition-colors"
+                        title="Keep this one — worth acting on"
+                      >
+                        Save
+                      </button>
+                    )}
                     <button
                       onClick={() => updateStatus(item.id, 'dismissed')}
                       className="text-xs px-2.5 py-1 bg-warm-100 text-warm-500 rounded-md hover:bg-warm-200 transition-colors"
+                      title="Hide this from the default view"
                     >
                       Dismiss
                     </button>
                   </div>
+                )}
+                {item.status === 'dismissed' && (
+                  <button
+                    onClick={() => updateStatus(item.id, 'new')}
+                    className="text-xs px-2.5 py-1 bg-warm-100 text-warm-600 rounded-md hover:bg-warm-200 transition-colors flex-shrink-0"
+                    title="Bring this back into the active list"
+                  >
+                    Restore
+                  </button>
                 )}
 
                 {item.source && (

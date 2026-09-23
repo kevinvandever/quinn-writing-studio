@@ -169,6 +169,52 @@ intelligenceRouter.get('/publishing', asyncHandler(async (req: Request, res: Res
   });
 }));
 
+/**
+ * List writing job items. Deadline-bearing items first, then newest.
+ */
+intelligenceRouter.get('/writing-jobs', asyncHandler(async (req: Request, res: Response) => {
+  const { status, subcategory, limit = '50', offset = '0' } = req.query;
+
+  let whereClause = `WHERE category = 'writing_jobs'`;
+  const params: unknown[] = [];
+  let paramIdx = 1;
+
+  if (status && typeof status === 'string') {
+    whereClause += ` AND status = $${paramIdx}`;
+    params.push(status);
+    paramIdx++;
+  }
+
+  if (subcategory && typeof subcategory === 'string') {
+    whereClause += ` AND subcategory = $${paramIdx}`;
+    params.push(subcategory);
+    paramIdx++;
+  }
+
+  const countResult = await query<{ count: string }>(
+    `SELECT COUNT(*) as count FROM intelligence_items ${whereClause}`,
+    params
+  );
+
+  const result = await query(
+    `SELECT id, category, subcategory, title, source, source_name, summary,
+            relevance_score, deadline, status, published_at, discovered_at, reviewed_at
+     FROM intelligence_items
+     ${whereClause}
+     ORDER BY
+       CASE WHEN deadline IS NOT NULL THEN 0 ELSE 1 END,
+       deadline ASC,
+       discovered_at DESC
+     LIMIT $${paramIdx} OFFSET $${paramIdx + 1}`,
+    [...params, parseInt(limit as string, 10), parseInt(offset as string, 10)]
+  );
+
+  res.json({
+    items: result.rows,
+    total: parseInt(countResult.rows[0]?.count || '0', 10),
+  });
+}));
+
 // ─── POST /api/intelligence/scan ─────────────────────────────────────────────
 
 /**
@@ -180,7 +226,7 @@ intelligenceRouter.post('/scan', asyncHandler(async (req: Request, res: Response
   const userId = req.user!.userId;
   const { category } = req.body as { category?: string };
 
-  const validCategories = ['grant', 'ai_news', 'publishing'];
+  const validCategories = ['grant', 'ai_news', 'publishing', 'writing_jobs'];
   if (!category || !validCategories.includes(category)) {
     throw new AppError(
       400,
@@ -196,6 +242,9 @@ intelligenceRouter.post('/scan', asyncHandler(async (req: Request, res: Response
   } else if (category === 'ai_news') {
     const { runAiNewsScanner } = await import('../jobs/ai-news-scanner.job.js');
     storedCount = await runAiNewsScanner(userId);
+  } else if (category === 'writing_jobs') {
+    const { runWritingJobsScanner } = await import('../jobs/writing-jobs-scanner.job.js');
+    storedCount = await runWritingJobsScanner(userId);
   } else {
     const { runPublishingScanner } = await import('../jobs/publishing-scanner.job.js');
     storedCount = await runPublishingScanner(userId);

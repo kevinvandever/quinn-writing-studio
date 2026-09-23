@@ -5,6 +5,7 @@ import { query } from '../db/connection.js';
 import { runGrantScanner } from './grant-scanner.job.js';
 import { runAiNewsScanner } from './ai-news-scanner.job.js';
 import { runPublishingScanner } from './publishing-scanner.job.js';
+import { runWritingJobsScanner } from './writing-jobs-scanner.job.js';
 import { runNudgeChecker } from './nudge-checker.job.js';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
@@ -13,6 +14,7 @@ export interface IntelligenceSchedules {
   grant_scanner: string;
   ai_news_scanner: string;
   publishing_scanner: string;
+  writing_jobs_scanner: string;
   [key: string]: string;
 }
 
@@ -27,6 +29,7 @@ const DEFAULT_SCHEDULES: IntelligenceSchedules = {
   grant_scanner: '0 6 * * *',       // Daily at 6:00 AM UTC
   ai_news_scanner: '0 */6 * * *',   // Every 6 hours
   publishing_scanner: '0 7 * * *',   // Daily at 7:00 AM UTC
+  writing_jobs_scanner: '0 8 * * *', // Daily at 8:00 AM UTC (jobs go stale fast)
 };
 
 // ─── Bull Queue Setup ────────────────────────────────────────────────────────
@@ -77,6 +80,11 @@ function getQueue(): Bull.Queue<JobPayload> {
     intelligenceQueue.process('ai-news-scan', async (job) => {
       console.log('[JobScheduler] Processing ai-news-scan job');
       await runAiNewsScanner(job.data.userId);
+    });
+
+    intelligenceQueue.process('writing-jobs-scan', async (job) => {
+      console.log('[JobScheduler] Processing writing-jobs-scan job');
+      return runWritingJobsScanner(job.data.userId);
     });
 
     intelligenceQueue.process('publishing-scan', async (job) => {
@@ -146,6 +154,15 @@ export async function startScheduler(): Promise<void> {
     });
     cronJobs.push(task);
     console.log(`[JobScheduler] Publishing scanner scheduled: ${schedules.publishing_scanner}`);
+  }
+
+  // Schedule writing jobs scanner
+  if (schedules.writing_jobs_scanner && cron.validate(schedules.writing_jobs_scanner)) {
+    const task = cron.schedule(schedules.writing_jobs_scanner, async () => {
+      await queue.add('writing-jobs-scan', { userId, jobType: 'writing-jobs-scan' });
+    });
+    cronJobs.push(task);
+    console.log(`[JobScheduler] Writing jobs scanner scheduled: ${schedules.writing_jobs_scanner}`);
   }
 
   // Schedule nudge checker (hourly)

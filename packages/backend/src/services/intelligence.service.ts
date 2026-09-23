@@ -4,7 +4,7 @@ import { logApiUsage } from './usage-tracking.service.js';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
-export type IntelligenceCategory = 'grant' | 'ai_news' | 'publishing';
+export type IntelligenceCategory = 'grant' | 'ai_news' | 'publishing' | 'writing_jobs';
 
 export type IntelligenceStatus = 'new' | 'reviewed' | 'selected' | 'saved' | 'dismissed';
 
@@ -234,6 +234,18 @@ Score higher for: memoir/essay markets, creative nonfiction agents, literary mag
 
 Return ONLY a JSON array, no other text. Example:
 [{"summary": "...", "relevance_score": 0.8, "subcategory": "submission_window"}]`;
+
+    case 'writing_jobs':
+      return `${basePrompt}
+
+For writing jobs, subcategory should be one of: "freelance", "staff", "teaching", "call_for_pitches", "other"
+This writer's profile: a long technology career, two published technical books, decades of trade-press bylines, current work explaining AI to general audiences, plus literary memoir and personal essay. They are not seeking entry-level work.
+Score higher for: paid freelance or contract writing, work that pays professional rates, technology/AI explanatory writing, ghostwriting nonfiction, editorial and essay commissions, teaching or workshop roles.
+Score lower for: unpaid or "exposure" listings, content-mill and SEO-volume work, entry-level or internship roles, listings requiring relocation, and anything whose pay is unstated or implausibly low.
+In the summary, lead with what the work is and the pay or rate if stated; say "rate not stated" when it isn't.
+
+Return ONLY a JSON array, no other text. Example:
+[{"summary": "...", "relevance_score": 0.8, "subcategory": "freelance"}]`;
 
     default:
       return basePrompt;

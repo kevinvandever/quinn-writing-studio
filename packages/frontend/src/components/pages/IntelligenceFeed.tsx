@@ -24,7 +24,7 @@ interface ItemsResponse {
   total: number;
 }
 
-type Tab = 'grants' | 'ai-news' | 'publishing';
+type Tab = 'grants' | 'ai-news' | 'publishing' | 'writing-jobs';
 
 /**
  * Tab ids match the GET endpoints (/api/intelligence/ai-news), but the scan
@@ -34,6 +34,7 @@ const SCAN_CATEGORY: Record<Tab, string> = {
   grants: 'grant',
   'ai-news': 'ai_news',
   publishing: 'publishing',
+  'writing-jobs': 'writing_jobs',
 };
 
 export function IntelligenceFeed() {
@@ -106,6 +107,7 @@ export function IntelligenceFeed() {
     { key: 'grants', label: 'Grants', icon: '💰' },
     { key: 'ai-news', label: 'AI News', icon: '🤖' },
     { key: 'publishing', label: 'Publishing', icon: '📖' },
+    { key: 'writing-jobs', label: 'Writing Jobs', icon: '💼' },
   ];
 
   return (

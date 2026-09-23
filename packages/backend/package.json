@@ -11,6 +11,7 @@
     "typecheck": "tsc --noEmit",
     "migrate": "node-pg-migrate",
     "migrate:up": "NODE_OPTIONS='--import tsx/esm' node-pg-migrate up --migrations-dir src/db/migrations --envPath .env",
+    "migrate:up:remote": "NODE_OPTIONS='--import tsx/esm' node-pg-migrate up --migrations-dir src/db/migrations",
     "seed": "tsx src/db/seed.ts",
     "seed:kevin": "tsx src/db/seed-kevin.ts",
     "db:restructure": "tsx src/db/restructure-persona.ts",

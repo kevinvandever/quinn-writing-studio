@@ -276,6 +276,15 @@ export function IntelligenceFeed() {
                         Select
                       </button>
                     )}
+                    {item.status === 'new' && (
+                      <button
+                        onClick={() => updateStatus(item.id, 'reviewed')}
+                        className="text-xs px-2.5 py-1 bg-sage-50 text-sage-700 rounded-md hover:bg-sage-100 transition-colors"
+                        title="Mark as read — keeps it in the list, clears the 'new' badge"
+                      >
+                        Mark read
+                      </button>
+                    )}
                     {item.status !== 'saved' && (
                       <button
                         onClick={() => updateStatus(item.id, 'saved')}

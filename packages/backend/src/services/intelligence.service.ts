@@ -174,6 +174,8 @@ async function processBatch(
     )
     .join('\n\n---\n\n');
 
+  // Haiku at low effort: this is batch summarize-and-score that runs several
+  // times a day, so it shouldn't spend Sonnet money.
   const response = await sendMessage({
     systemPrompt,
     messages: [
@@ -182,13 +184,14 @@ async function processBatch(
         content: `Please analyze and summarize the following ${category} items:\n\n${itemDescriptions}`,
       },
     ],
-    model: 'sonnet',
+    model: 'haiku',
+    effort: 'low',
   });
 
   // Log API usage
   await logApiUsage(
     userId,
-    'sonnet',
+    response.model,
     'intelligence',
     response.inputTokens,
     response.outputTokens

@@ -7,6 +7,7 @@
 
 import { query } from '../db/connection.js';
 import { sendMessage, type ModelSelection } from './claude-api.service.js';
+import { logApiUsage } from './usage-tracking.service.js';
 
 export type NudgeType =
   | 'quiet_period_gentle'
@@ -66,16 +67,25 @@ Context about the situation: ${JSON.stringify(context)}`;
 
   const taskPrompt = NUDGE_PROMPTS[nudgeType];
 
-  // Generate nudge text via Claude (always use Sonnet for nudges — quick, efficient)
-  const model: ModelSelection = 'sonnet';
+  // Nudges are one to three sentences from a scheduled job: Haiku at low effort.
+  const model: ModelSelection = 'haiku';
 
   const response = await sendMessage({
     systemPrompt,
     messages: [{ role: 'user', content: taskPrompt }],
     model,
+    effort: 'low',
+    maxTokens: 2000,
   });
 
-  const nudgeText = response.content;
+  await logApiUsage(userId, response.model, 'nudge', response.inputTokens, response.outputTokens);
+
+  const nudgeText = response.content.trim();
+  if (!nudgeText) {
+    // Don't store a blank nudge; the next scheduled check will try again.
+    console.warn(`[Nudge] Generation returned no text for ${nudgeType}; skipping`);
+    return '';
+  }
 
   // Store the nudge in the database
   await query(

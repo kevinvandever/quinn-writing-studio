@@ -1,6 +1,7 @@
 import Anthropic from '@anthropic-ai/sdk';
 import type { Response } from 'express';
 import { config } from '../config.js';
+import { formatWriterDate, formatWriterTime } from '../utils/time.js';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -14,7 +15,18 @@ export type TaskType =
   | 'promptly_coaching'
   | 'central_question_evaluation';
 
-export type ModelSelection = 'sonnet' | 'opus';
+/**
+ * Logical model slots. 'haiku' is for background work (intelligence curation,
+ * nudges) and is never chosen by determineModel for coaching.
+ */
+export type ModelSelection = 'sonnet' | 'opus' | 'haiku';
+
+/**
+ * How much work the model puts into a response, including how much it thinks.
+ * Sent as output_config.effort. Current models think adaptively by default, and
+ * thinking tokens count toward max_tokens and are billed as output.
+ */
+export type Effort = 'low' | 'medium' | 'high';
 
 export type ModelRoutingPreference = 'always_sonnet' | 'always_opus' | 'auto';
 
@@ -46,6 +58,10 @@ export interface SendMessageOptions {
   systemPrompt: string;
   messages: ClaudeMessage[];
   model: ModelSelection;
+  /** Defaults to 'low': non-streaming calls are background or short tasks. */
+  effort?: Effort;
+  /** Ceiling on output, thinking included. Defaults to DEFAULT_MAX_TOKENS. */
+  maxTokens?: number;
   onStream?: (token: string) => void;
 }
 
@@ -55,10 +71,35 @@ const anthropic = new Anthropic({
   apiKey: config.ANTHROPIC_API_KEY,
 });
 
+/**
+ * Model IDs per slot. Override with env vars in Railway if needed; if you do,
+ * pick a model that accepts output_config.effort, and update PRICING in
+ * usage-tracking.service.ts so cost estimates stay right.
+ */
 const MODEL_MAP: Record<ModelSelection, string> = {
-  sonnet: process.env.CLAUDE_SONNET_MODEL || 'claude-sonnet-4-6',
-  opus: process.env.CLAUDE_OPUS_MODEL || 'claude-opus-4-8',
+  sonnet: process.env.CLAUDE_SONNET_MODEL || 'claude-sonnet-5-5',
+  opus: process.env.CLAUDE_OPUS_MODEL || 'claude-opus-5-5',
+  haiku: process.env.CLAUDE_HAIKU_MODEL || 'claude-haiku-5-5',
 };
+
+/** Output ceiling for non-streaming calls. Thinking counts toward it. */
+const DEFAULT_MAX_TOKENS = 8000;
+
+/**
+ * Output ceiling for streamed coaching replies. Deep workflows at high effort
+ * can think for several thousand tokens before writing a long reply, so this is
+ * well above the old 4,096 cap. It's a ceiling, not a target: billing follows
+ * the tokens actually generated.
+ */
+const COACHING_MAX_TOKENS = 16000;
+
+/** Join every text block; with thinking on, the first block may not be text. */
+function extractText(content: Anthropic.Messages.ContentBlock[]): string {
+  return content
+    .filter((block): block is Anthropic.Messages.TextBlock => block.type === 'text')
+    .map((block) => block.text)
+    .join('');
+}
 
 // ─── Core Functions ──────────────────────────────────────────────────────────
 
@@ -72,6 +113,8 @@ export async function sendMessage(
 ): Promise<ClaudeResponse> {
   const { systemPrompt, messages, model, onStream } = options;
   const modelId = MODEL_MAP[model];
+  const effort: Effort = options.effort ?? 'low';
+  const maxTokens = options.maxTokens ?? DEFAULT_MAX_TOKENS;
 
   if (onStream) {
     // Streaming mode
@@ -81,7 +124,8 @@ export async function sendMessage(
 
     const stream = anthropic.messages.stream({
       model: modelId,
-      max_tokens: 4096,
+      max_tokens: maxTokens,
+      output_config: { effort },
       system: systemPrompt,
       messages: messages.map((m) => ({
         role: m.role,
@@ -109,7 +153,8 @@ export async function sendMessage(
     // Non-streaming mode
     const response = await anthropic.messages.create({
       model: modelId,
-      max_tokens: 4096,
+      max_tokens: maxTokens,
+      output_config: { effort },
       system: systemPrompt,
       messages: messages.map((m) => ({
         role: m.role,
@@ -117,8 +162,12 @@ export async function sendMessage(
       })),
     });
 
-    const textBlock = response.content.find((block) => block.type === 'text');
-    const content = textBlock ? textBlock.text : '';
+    const content = extractText(response.content);
+    if (!content) {
+      console.warn(
+        `[Claude] ${modelId} returned no text (stop_reason: ${response.stop_reason}, output tokens: ${response.usage.output_tokens})`
+      );
+    }
 
     return {
       content,
@@ -132,7 +181,11 @@ export async function sendMessage(
 
 /**
  * Pipe Anthropic stream events to an Express Response as Server-Sent Events.
- * Sends events: 'token', 'model_info', 'done', 'error'
+ * Sends events: 'token', 'model_info', 'retrying', 'done', 'error'.
+ *
+ * Resolves with empty content (after sending an 'error' event) when the model
+ * produced no text, e.g. thinking used the whole output budget or the model
+ * declined. Callers should log usage but not persist an empty reply.
  */
 export function streamToSSE(
   res: Response,
@@ -141,9 +194,10 @@ export function streamToSSE(
     messages: ClaudeMessage[];
     model: ModelSelection;
     modelReason: string;
+    effort: Effort;
   }
 ): { promise: Promise<ClaudeResponse>; abort: () => void } {
-  const { systemPrompt, messages, model, modelReason } = options;
+  const { systemPrompt, messages, model, modelReason, effort } = options;
   const modelId = MODEL_MAP[model];
 
   // Set SSE headers
@@ -159,7 +213,28 @@ export function streamToSSE(
   );
 
   let aborted = false;
+  let finished = false;
   let currentStream: ReturnType<typeof anthropic.messages.stream> | null = null;
+
+  // The model can think for a while before its first token. An SSE comment
+  // every 15s keeps proxies from treating the quiet connection as idle; the
+  // client ignores comment lines.
+  const keepAlive = setInterval(() => {
+    if (!finished && !res.writableEnded) res.write(': keepalive\n\n');
+  }, 15000);
+  res.on('close', () => clearInterval(keepAlive));
+
+  /** Write an optional final event and end the response, exactly once. */
+  function finish(event?: { name: 'done' | 'error'; data: unknown }): void {
+    if (finished) return;
+    finished = true;
+    clearInterval(keepAlive);
+    if (res.writableEnded) return;
+    if (event) {
+      res.write(`event: ${event.name}\ndata: ${JSON.stringify(event.data)}\n\n`);
+    }
+    res.end();
+  }
 
   /**
    * Determine if an error is transient and worth retrying.
@@ -188,12 +263,17 @@ export function streamToSSE(
      * retryable error, wait with exponential backoff and try again.
      */
     async function attempt(retryCount: number): Promise<void> {
-      if (aborted) return;
+      if (aborted || finished) return;
 
       let streamedAnyText = false;
+      // The SDK emits 'end' right after 'error'. This flag tells the 'end'
+      // handler that the error handler already decided this attempt's outcome
+      // (retry or fail), so it must not report anything itself.
+      let failed = false;
       const stream = anthropic.messages.stream({
         model: modelId,
-        max_tokens: 4096,
+        max_tokens: COACHING_MAX_TOKENS,
+        output_config: { effort },
         system: systemPrompt,
         messages: messages.map((m) => ({
           role: m.role,
@@ -203,14 +283,15 @@ export function streamToSSE(
       currentStream = stream;
 
       stream.on('text', (text) => {
-        if (aborted) return;
+        if (aborted || finished) return;
         streamedAnyText = true;
         fullContent += text;
         res.write(`event: token\ndata: ${JSON.stringify({ token: text })}\n\n`);
       });
 
-      stream.on('error', async (error) => {
-        if (aborted) return;
+      stream.on('error', (error) => {
+        failed = true;
+        if (aborted || finished) return;
 
         // If we can still retry and nothing has been streamed yet, back off and retry
         if (!streamedAnyText && retryCount < MAX_RETRIES && isRetryableError(error)) {
@@ -223,7 +304,7 @@ export function streamToSSE(
             `event: retrying\ndata: ${JSON.stringify({ attempt: retryCount + 1, delayMs })}\n\n`
           );
           setTimeout(() => {
-            if (!aborted) attempt(retryCount + 1);
+            void attempt(retryCount + 1);
           }, delayMs);
           return;
         }
@@ -232,19 +313,17 @@ export function streamToSSE(
         const friendlyMessage = isRetryableError(error)
           ? 'Quinn is experiencing high demand right now. Please try again in a moment.'
           : (error as Error).message;
-        res.write(
-          `event: error\ndata: ${JSON.stringify({ message: friendlyMessage })}\n\n`
-        );
-        res.end();
+        finish({ name: 'error', data: { message: friendlyMessage } });
         reject(error);
       });
 
       stream.on('end', () => {
+        if (failed || aborted || finished) return;
         // Wait for finalMessage to get token counts
         stream
           .finalMessage()
           .then((finalMessage) => {
-            if (aborted) return;
+            if (aborted || finished) return;
 
             const response: ClaudeResponse = {
               content: fullContent,
@@ -254,30 +333,46 @@ export function streamToSSE(
               outputTokens: finalMessage.usage.output_tokens,
             };
 
-            res.write(
-              `event: done\ndata: ${JSON.stringify({ inputTokens: response.inputTokens, outputTokens: response.outputTokens })}\n\n`
-            );
-            res.end();
+            if (finalMessage.stop_reason === 'max_tokens') {
+              console.warn(
+                `[Claude] ${modelId} hit max_tokens (${COACHING_MAX_TOKENS}) at effort ${effort}`
+              );
+            }
+
+            if (!fullContent.trim()) {
+              console.warn(
+                `[Claude] ${modelId} returned no text (stop_reason: ${finalMessage.stop_reason}, output tokens: ${response.outputTokens})`
+              );
+              const message =
+                finalMessage.stop_reason === 'refusal'
+                  ? "Quinn couldn't respond to that one. Try rephrasing it."
+                  : "Quinn didn't finish a reply that time. Please try again.";
+              finish({ name: 'error', data: { message } });
+              resolve(response);
+              return;
+            }
+
+            finish({
+              name: 'done',
+              data: { inputTokens: response.inputTokens, outputTokens: response.outputTokens },
+            });
             resolve(response);
           })
           .catch((err) => {
-            if (aborted) return;
-            res.write(
-              `event: error\ndata: ${JSON.stringify({ message: (err as Error).message })}\n\n`
-            );
-            res.end();
+            if (aborted || finished) return;
+            finish({ name: 'error', data: { message: (err as Error).message } });
             reject(err);
           });
       });
     }
 
-    attempt(0);
+    void attempt(0);
   });
 
   const abort = () => {
     aborted = true;
     if (currentStream) currentStream.abort();
-    res.end();
+    finish();
   };
 
   return { promise, abort };
@@ -389,10 +484,15 @@ export function determineModel(
 
 // ─── System Prompt Assembly ──────────────────────────────────────────────────
 
-/** Token budget per model (approximate characters, ~4 chars per token) */
+/**
+ * System-prompt budget per model, in characters. The 5.x models' tokenizer
+ * averages roughly 3 characters per token for prose, so 128k chars is about
+ * 40k tokens and 256k about 85k.
+ */
 const TOKEN_BUDGET: Record<ModelSelection, number> = {
-  sonnet: 32000 * 4, // 32k tokens ≈ 128k chars
-  opus: 64000 * 4, // 64k tokens ≈ 256k chars
+  sonnet: 32000 * 4, // 128k chars
+  opus: 64000 * 4, // 256k chars
+  haiku: 32000 * 4, // not used for coaching prompts
 };
 
 export interface ProjectContext {
@@ -463,20 +563,9 @@ export function assembleSystemPrompt(options: AssemblePromptOptions): string {
   const budget = TOKEN_BUDGET[model];
   const sections: string[] = [];
 
-  // 0. Current date/time context
+  // 0. Current date/time context, in the writer's time zone (the server runs in UTC)
   const now = new Date();
-  const dateStr = now.toLocaleDateString('en-US', {
-    weekday: 'long',
-    year: 'numeric',
-    month: 'long',
-    day: 'numeric',
-  });
-  const timeStr = now.toLocaleTimeString('en-US', {
-    hour: 'numeric',
-    minute: '2-digit',
-    hour12: true,
-  });
-  sections.push(`## Current Date and Time\n${dateStr}, ${timeStr}\n\nUse this naturally in conversation when relevant — acknowledge gaps between sessions, reference time of day, etc.`);
+  sections.push(`## Current Date and Time\n${formatWriterDate(now)}, ${formatWriterTime(now)} (the writer's local time)\n\nUse this naturally in conversation when relevant — acknowledge gaps between sessions, reference time of day, etc.`);
 
   // 1. Persona configuration
   const personaSection = buildPersonaSection(personaConfig);
@@ -640,6 +729,13 @@ function buildPersonaSection(personaConfig: Record<string, unknown>): string {
         `\nThe writer's style (what to preserve):\n${writerStyle.map((s) => `- ${s}`).join('\n')}`
       );
     }
+
+    const writerContext = kevinProfile['context'] as string[] | undefined;
+    if (writerContext && writerContext.length > 0) {
+      lines.push(
+        `\nAbout the writer (background you already know; don't make them repeat it):\n${writerContext.map((c) => `- ${c}`).join('\n')}`
+      );
+    }
   }
 
   if (identity) {
@@ -674,12 +770,7 @@ function buildSessionHistorySection(sessions: SessionSummary[]): string {
   );
 
   for (const session of sessions.slice(0, 3)) {
-    const date = session.startedAt.toLocaleDateString('en-US', {
-      weekday: 'long',
-      year: 'numeric',
-      month: 'long',
-      day: 'numeric',
-    });
+    const date = formatWriterDate(session.startedAt);
     lines.push(`\n### Session — ${date}`);
     if (session.summary) {
       lines.push(`What happened: ${session.summary}`);

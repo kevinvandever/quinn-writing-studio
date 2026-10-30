@@ -26,6 +26,7 @@ quinn-writing-studio/
 │   │   │   │   ├── target-venues.ts             # Curated journal shortlist (EDIT HERE to add venues)
 │   │   │   │   ├── ethics.service.ts            # Writing ethics enforcement
 │   │   │   │   ├── scrivener-parser.service.ts  # .scriv import
+│   │   │   │   ├── scrivener-sync.service.ts    # Applies a parsed binder in place, keyed by Scrivener UUID (keeps summaries, earmarks, snapshots)
 │   │   │   │   ├── substack-sync.service.ts     # RSS/API sync
 │   │   │   │   ├── theme-analysis.service.ts    # Cross-project themes
 │   │   │   │   ├── intelligence.service.ts      # Grant/news/publishing pipeline
@@ -44,6 +45,7 @@ quinn-writing-studio/
 │   │   │   ├── types/                   # TypeScript type extensions
 │   │   │   └── utils/
 │   │   │       ├── encryption.ts        # AES-256-GCM encrypt/decrypt
+│   │   │       ├── time.ts              # Dates/times in the writer's time zone
 │   │   │       └── rtf-parser.ts        # RTF to plain text
 │   │   ├── Dockerfile
 │   │   ├── railway.toml

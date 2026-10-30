@@ -8,6 +8,7 @@
 
 import { query, getClient } from '../db/connection.js';
 import { sendMessage } from './claude-api.service.js';
+import { logApiUsage } from './usage-tracking.service.js';
 
 export interface ThemeConnection {
   id: string;
@@ -57,7 +58,7 @@ export async function analyzeThemes(userId: string): Promise<ThemeConnection[]> 
   }));
 
   // Send to Claude Opus for theme analysis
-  const discoveredThemes = await identifyThemes(documentSummaries);
+  const discoveredThemes = await identifyThemes(userId, documentSummaries);
 
   // Store discovered connections
   const client = await getClient();
@@ -150,7 +151,7 @@ export async function checkDocumentThemes(
   }));
 
   // Ask Claude to find connections
-  const themes = await findConnectionsForDocument(newDocSummary, existingSummaries);
+  const themes = await findConnectionsForDocument(userId, newDocSummary, existingSummaries);
 
   // Store connections
   const storedConnections: ThemeConnection[] = [];
@@ -223,6 +224,7 @@ async function loadUserDocuments(userId: string): Promise<DocumentSummary[]> {
 }
 
 async function identifyThemes(
+  userId: string,
   documents: Array<{ id: string; projectName: string; title: string; excerpt: string }>
 ): Promise<DiscoveredTheme[]> {
   const systemPrompt = `You are a literary analyst specializing in identifying thematic connections across a writer's body of work. You look for recurring themes, narrative threads, stylistic patterns, and conceptual links between documents.
@@ -252,7 +254,10 @@ Return ONLY the JSON array, no other text.`;
     systemPrompt,
     messages: [{ role: 'user', content: userMessage }],
     model: 'opus',
+    effort: 'medium',
   });
+
+  await logApiUsage(userId, response.model, 'theme_analysis', response.inputTokens, response.outputTokens);
 
   try {
     const parsed = JSON.parse(response.content) as DiscoveredTheme[];
@@ -273,6 +278,7 @@ Return ONLY the JSON array, no other text.`;
 }
 
 async function findConnectionsForDocument(
+  userId: string,
   newDoc: { id: string; projectName: string; title: string; excerpt: string },
   existingDocs: Array<{ id: string; projectName: string; title: string; excerpt: string }>
 ): Promise<DiscoveredTheme[]> {
@@ -296,7 +302,10 @@ Return ONLY the JSON array, no other text. If no connections found, return [].`;
     systemPrompt,
     messages: [{ role: 'user', content: userMessage }],
     model: 'sonnet', // Use Sonnet for single-document checks (faster)
+    effort: 'low',
   });
+
+  await logApiUsage(userId, response.model, 'theme_analysis', response.inputTokens, response.outputTokens);
 
   try {
     const parsed = JSON.parse(response.content) as DiscoveredTheme[];

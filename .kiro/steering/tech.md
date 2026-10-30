@@ -20,7 +20,7 @@ npm workspaces monorepo with two packages: `packages/frontend` and `packages/bac
 - **Database**: PostgreSQL via `pg`, migrations via `node-pg-migrate`
 - **Cache/Queue**: Redis via `ioredis`, job queue via `bull`
 - **Scheduling**: `node-cron` for background intelligence jobs
-- **AI**: `@anthropic-ai/sdk` — Claude Sonnet (everyday) and Opus (deep analysis)
+- **AI**: `@anthropic-ai/sdk` — Claude Sonnet 5.5 (everyday coaching, medium effort), Opus 5.5 (workflows and deep modes, high effort), Haiku 5.5 (background jobs: intelligence curation, nudges). IDs default in `claude-api.service.ts` and can be overridden with `CLAUDE_SONNET_MODEL` / `CLAUDE_OPUS_MODEL` / `CLAUDE_HAIKU_MODEL`; prices for cost tracking live in `usage-tracking.service.ts`. Current models think before answering and thinking counts toward `max_tokens`, so don't lower the caps casually. Dates/times in prompts use `WRITER_TIME_ZONE` (default `America/New_York`) because Railway runs in UTC.
 - **Auth**: `bcrypt` for password hashing, `jsonwebtoken` for JWT in HTTP-only cookies
 - **Validation**: `zod` for request/env validation
 - **Security**: `helmet`, `express-rate-limit` with Redis store, AES-256-GCM encryption for sensitive fields

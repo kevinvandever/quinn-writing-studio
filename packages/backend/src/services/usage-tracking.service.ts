@@ -4,9 +4,13 @@ import type { ModelSelection } from './claude-api.service.js';
 // ─── Pricing Configuration ───────────────────────────────────────────────────
 
 /**
- * Configurable pricing rates per 1M tokens.
- * Sonnet 4.6: $3 input / $15 output per 1M tokens
- * Opus 4.8: $5 input / $25 output per 1M tokens
+ * Pricing per 1M tokens for the default models in claude-api.service.ts
+ * (https://platform.claude.com/docs/en/about-claude/pricing, October 2026):
+ *   Sonnet 5.5: $2 input / $10 output
+ *   Opus 5.5:   $4 input / $20 output
+ *   Haiku 5.5:  $0.10 input / $0.50 output (prompts up to 100k tokens)
+ * Output includes thinking tokens. If you override a model ID with an env var,
+ * update its rates here.
  */
 interface ModelPricing {
   inputPer1M: number;
@@ -15,12 +19,16 @@ interface ModelPricing {
 
 const PRICING: Record<ModelSelection, ModelPricing> = {
   sonnet: {
-    inputPer1M: 3.0,
-    outputPer1M: 15.0,
+    inputPer1M: 2.0,
+    outputPer1M: 10.0,
   },
   opus: {
-    inputPer1M: 5.0,
-    outputPer1M: 25.0,
+    inputPer1M: 4.0,
+    outputPer1M: 20.0,
+  },
+  haiku: {
+    inputPer1M: 0.1,
+    outputPer1M: 0.5,
   },
 };
 

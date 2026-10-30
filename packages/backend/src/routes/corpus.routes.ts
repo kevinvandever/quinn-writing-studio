@@ -6,20 +6,50 @@
 
 import { Router, Request, Response } from 'express';
 import multer from 'multer';
-import { query, getClient } from '../db/connection.js';
+import { z } from 'zod';
+import { query } from '../db/connection.js';
 import { requireAuth } from '../middleware/auth.middleware.js';
 import { asyncHandler } from '../middleware/async-handler.js';
 import { AppError, ErrorCodes } from '../middleware/error-handler.middleware.js';
 import {
   parseScrivenerZip,
-  detectChanges,
-  type ParsedDocument,
   type ScrivenerParseResult,
 } from '../services/scrivener-parser.service.js';
+import {
+  applyScrivenerImport,
+  EmptyBinderError,
+  parsedDocumentSchema,
+  type ScrivenerImportInput,
+  type ScrivenerImportResult,
+} from '../services/scrivener-sync.service.js';
 import { checkDocumentThemes } from '../services/theme-analysis.service.js';
 import { ensureCorpusSummaries } from '../services/corpus-summary.service.js';
 
 const router = Router();
+
+/** Body the local watcher posts to /corpus/sync. */
+const syncBodySchema = z.object({
+  filename: z.string().min(1),
+  documents: z.array(parsedDocumentSchema),
+  totalWordCount: z.number().int().nonnegative(),
+  documentCount: z.number().int().nonnegative(),
+  parseErrors: z
+    .array(z.object({ documentName: z.string(), error: z.string() }))
+    .optional()
+    .default([]),
+});
+
+/** Apply an import, turning an empty-binder refusal into a 400. */
+async function runScrivenerImport(input: ScrivenerImportInput): Promise<ScrivenerImportResult> {
+  try {
+    return await applyScrivenerImport(input);
+  } catch (err) {
+    if (err instanceof EmptyBinderError) {
+      throw new AppError(400, ErrorCodes.VALIDATION_ERROR, err.message);
+    }
+    throw err;
+  }
+}
 
 // Configure multer for in-memory file upload (max 50MB for .scriv ZIPs)
 const upload = multer({
@@ -77,116 +107,33 @@ router.post(
       throw new AppError(400, ErrorCodes.VALIDATION_ERROR, `Scrivener import failed: ${message}`);
     }
 
-    // Get existing documents for this project (for change detection)
-    const existingDocs = await query<{
-      id: string;
-      source_id: string;
-      title: string;
-      content_hash: string;
-      word_count: number;
-      content: string;
-    }>(
-      `SELECT id, source_id, title, content_hash, word_count, content
-       FROM corpus_documents
-       WHERE project_id = $1 AND source_type = 'scrivener'`,
-      [projectId]
-    );
+    // Update the corpus in place (keyed by Scrivener UUID) so summaries,
+    // earmarks, draft snapshots, and theme links survive the import.
+    const { importId, diffSummary } = await runScrivenerImport({
+      projectId: projectId as string,
+      userId,
+      filename: parseResult.filename,
+      documents: parseResult.documents,
+      documentCount: parseResult.documentCount,
+      totalWordCount: parseResult.totalWordCount,
+      parseErrors: parseResult.parseErrors,
+      source: 'upload',
+      skipIfUnchanged: false,
+    });
 
-    // Detect changes
-    const diffSummary = detectChanges(parseResult.documents, existingDocs.rows);
+    // Generate per-document summaries in the background (non-blocking).
+    void ensureCorpusSummaries(projectId as string, userId);
 
-    // Start a transaction for the import
-    const client = await getClient();
-
-    try {
-      await client.query('BEGIN');
-
-      // Create pre-import snapshots for modified documents (Task 9.5)
-      for (const modified of diffSummary.modified) {
-        const existingDoc = existingDocs.rows.find((d) => d.source_id === modified.uuid);
-        if (existingDoc) {
-          await client.query(
-            `INSERT INTO draft_snapshots (document_id, content, word_count, trigger)
-             VALUES ($1, $2, $3, 'pre_import_update')`,
-            [existingDoc.id, existingDoc.content, existingDoc.word_count]
-          );
-        }
-      }
-
-      // Create the import record
-      const importResult = await client.query<{ id: string }>(
-        `INSERT INTO scrivener_imports (project_id, filename, document_count, total_word_count, parse_errors, diff_summary)
-         VALUES ($1, $2, $3, $4, $5, $6)
-         RETURNING id`,
-        [
-          projectId,
-          parseResult.filename,
-          parseResult.documentCount,
-          parseResult.totalWordCount,
-          JSON.stringify(parseResult.parseErrors),
-          JSON.stringify(diffSummary),
-        ]
-      );
-
-      const importId = importResult.rows[0]!.id;
-
-      // Delete existing scrivener documents for this project (we'll re-insert)
-      await client.query(
-        `DELETE FROM corpus_documents WHERE project_id = $1 AND source_type = 'scrivener'`,
-        [projectId]
-      );
-
-      // Insert all documents from the parse result
-      await insertDocuments(client, projectId as string, importId, parseResult.documents, null);
-
-      // Log activity event (Task 9.7)
-      const previousTotalWordCount = existingDocs.rows.reduce(
-        (sum, doc) => sum + (doc.word_count || 0),
-        0
-      );
-      const wordCountDiff = parseResult.totalWordCount - previousTotalWordCount;
-
-      await client.query(
-        `INSERT INTO activity_events (user_id, project_id, event_type, metadata)
-         VALUES ($1, $2, 'scrivener_import', $3)`,
-        [
-          userId,
-          projectId,
-          JSON.stringify({
-            import_id: importId,
-            filename: parseResult.filename,
-            document_count: parseResult.documentCount,
-            total_word_count: parseResult.totalWordCount,
-            previous_word_count: previousTotalWordCount,
-            word_count_diff: wordCountDiff,
-            added_count: diffSummary.added.length,
-            modified_count: diffSummary.modified.length,
-            deleted_count: diffSummary.deleted.length,
-          }),
-        ]
-      );
-
-      await client.query('COMMIT');
-
-      // Generate per-document summaries in the background (non-blocking).
-      void ensureCorpusSummaries(projectId as string, userId);
-
-      res.status(201).json({
-        import: {
-          id: importId,
-          filename: parseResult.filename,
-          documentCount: parseResult.documentCount,
-          totalWordCount: parseResult.totalWordCount,
-          parseErrors: parseResult.parseErrors,
-          diffSummary,
-        },
-      });
-    } catch (err) {
-      await client.query('ROLLBACK');
-      throw err;
-    } finally {
-      client.release();
-    }
+    res.status(201).json({
+      import: {
+        id: importId,
+        filename: parseResult.filename,
+        documentCount: parseResult.documentCount,
+        totalWordCount: parseResult.totalWordCount,
+        parseErrors: parseResult.parseErrors,
+        diffSummary,
+      },
+    });
   })
 );
 
@@ -318,11 +265,7 @@ router.get('/projects/:id/corpus/imports', asyncHandler(async (req: Request, res
 router.post('/projects/:id/corpus/sync', asyncHandler(async (req: Request, res: Response) => {
   const userId = req.user!.userId;
   const projectId = req.params.id;
-  const { filename, documents, totalWordCount, documentCount, parseErrors } = req.body;
-
-  if (!filename || !documents || totalWordCount === undefined || documentCount === undefined) {
-    throw new AppError(400, ErrorCodes.VALIDATION_ERROR, 'filename, documents, totalWordCount, and documentCount are required');
-  }
+  const { filename, documents, totalWordCount, documentCount, parseErrors } = syncBodySchema.parse(req.body);
 
   // Verify project ownership
   const projectResult = await query<{ id: string }>(
@@ -334,123 +277,38 @@ router.post('/projects/:id/corpus/sync', asyncHandler(async (req: Request, res: 
     throw new AppError(404, ErrorCodes.NOT_FOUND, 'Project not found');
   }
 
-  // Get existing documents for change detection
-  const existingDocs = await query<{
-    id: string;
-    source_id: string;
-    title: string;
-    content_hash: string;
-    word_count: number;
-    content: string;
-  }>(
-    `SELECT id, source_id, title, content_hash, word_count, content
-     FROM corpus_documents
-     WHERE project_id = $1 AND source_type = 'scrivener'`,
-    [projectId]
-  );
+  // Update the corpus in place (keyed by Scrivener UUID) so summaries,
+  // earmarks, draft snapshots, and theme links survive the sync.
+  const { importId, diffSummary } = await runScrivenerImport({
+    projectId: projectId as string,
+    userId,
+    filename,
+    documents,
+    documentCount,
+    totalWordCount,
+    parseErrors,
+    source: 'watcher',
+    skipIfUnchanged: true,
+  });
 
-  // Detect changes
-  const diffSummary = detectChanges(documents, existingDocs.rows);
-
-  // If nothing changed, return early
-  if (diffSummary.added.length === 0 && diffSummary.modified.length === 0 && diffSummary.deleted.length === 0) {
+  if (!importId) {
     res.json({ import: null, message: 'No changes detected' });
     return;
   }
 
-  // Start a transaction for the import
-  const client = await getClient();
+  // Generate per-document summaries in the background (non-blocking).
+  void ensureCorpusSummaries(projectId as string, userId);
 
-  try {
-    await client.query('BEGIN');
-
-    // Create pre-import snapshots for modified documents
-    for (const modified of diffSummary.modified) {
-      const existingDoc = existingDocs.rows.find((d) => d.source_id === modified.uuid);
-      if (existingDoc) {
-        await client.query(
-          `INSERT INTO draft_snapshots (document_id, content, word_count, trigger)
-           VALUES ($1, $2, $3, 'pre_import_update')`,
-          [existingDoc.id, existingDoc.content, existingDoc.word_count]
-        );
-      }
-    }
-
-    // Create the import record
-    const importResult = await client.query<{ id: string }>(
-      `INSERT INTO scrivener_imports (project_id, filename, document_count, total_word_count, parse_errors, diff_summary)
-       VALUES ($1, $2, $3, $4, $5, $6)
-       RETURNING id`,
-      [
-        projectId,
-        filename,
-        documentCount,
-        totalWordCount,
-        JSON.stringify(parseErrors || []),
-        JSON.stringify(diffSummary),
-      ]
-    );
-
-    const importId = importResult.rows[0]!.id;
-
-    // Delete existing scrivener documents for this project (we'll re-insert)
-    await client.query(
-      `DELETE FROM corpus_documents WHERE project_id = $1 AND source_type = 'scrivener'`,
-      [projectId]
-    );
-
-    // Insert all documents from the parsed data
-    await insertDocuments(client, projectId as string, importId, documents, null);
-
-    // Log activity event
-    const previousTotalWordCount = existingDocs.rows.reduce(
-      (sum, doc) => sum + (doc.word_count || 0),
-      0
-    );
-    const wordCountDiff = totalWordCount - previousTotalWordCount;
-
-    await client.query(
-      `INSERT INTO activity_events (user_id, project_id, event_type, metadata)
-       VALUES ($1, $2, 'scrivener_import', $3)`,
-      [
-        userId,
-        projectId,
-        JSON.stringify({
-          import_id: importId,
-          filename,
-          document_count: documentCount,
-          total_word_count: totalWordCount,
-          previous_word_count: previousTotalWordCount,
-          word_count_diff: wordCountDiff,
-          added_count: diffSummary.added.length,
-          modified_count: diffSummary.modified.length,
-          deleted_count: diffSummary.deleted.length,
-          source: 'watcher',
-        }),
-      ]
-    );
-
-    await client.query('COMMIT');
-
-    // Generate per-document summaries in the background (non-blocking).
-    void ensureCorpusSummaries(projectId as string, userId);
-
-    res.status(201).json({
-      import: {
-        id: importId,
-        filename,
-        documentCount,
-        totalWordCount,
-        parseErrors: parseErrors || [],
-        diffSummary,
-      },
-    });
-  } catch (err) {
-    await client.query('ROLLBACK');
-    throw err;
-  } finally {
-    client.release();
-  }
+  res.status(201).json({
+    import: {
+      id: importId,
+      filename,
+      documentCount,
+      totalWordCount,
+      parseErrors,
+      diffSummary,
+    },
+  });
 }));
 
 /**
@@ -548,49 +406,6 @@ router.get('/projects/:id/corpus/diff', asyncHandler(async (req: Request, res: R
     importedAt: result.rows[0]!.imported_at,
   });
 }));
-
-/**
- * Recursively insert parsed documents into the database.
- */
-async function insertDocuments(
-  client: ReturnType<typeof getClient> extends Promise<infer T> ? T : never,
-  projectId: string,
-  importId: string,
-  documents: ParsedDocument[],
-  parentId: string | null
-): Promise<void> {
-  for (const doc of documents) {
-    // Strip null bytes that PostgreSQL rejects in text columns
-    const safeContent = (doc.content || '').replace(/\0/g, '');
-    const safeTitle = (doc.title || '').replace(/\0/g, '');
-
-    const result = await client.query<{ id: string }>(
-      `INSERT INTO corpus_documents (project_id, source_type, source_id, title, content, content_hash, word_count, parent_id, sort_order, is_folder, metadata, import_id)
-       VALUES ($1, 'scrivener', $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
-       RETURNING id`,
-      [
-        projectId,
-        doc.uuid,
-        safeTitle,
-        safeContent,
-        doc.contentHash,
-        doc.wordCount,
-        parentId,
-        doc.sortOrder,
-        doc.isFolder,
-        JSON.stringify({ scrivenerType: doc.scrivenerType ?? null }),
-        importId,
-      ]
-    );
-
-    const insertedId = result.rows[0]!.id;
-
-    // Recursively insert children
-    if (doc.children.length > 0) {
-      await insertDocuments(client, projectId, importId, doc.children, insertedId);
-    }
-  }
-}
 
 /**
  * Build a tree structure from flat document rows.

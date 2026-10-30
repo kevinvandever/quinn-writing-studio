@@ -14,4 +14,4 @@ Quinn Writing Studio is a personal AI writing coach platform for memoir and essa
 - Quinn never writes prose for the user — all writing is the user's own
 - The system is built for a single user (Kevin) first, but designed for future multi-tenant productization
 - Three active projects: Essay Collection book manuscript, kevinvandever.com/Substack, and Promptly (AI demystification)
-- Smart model routing: Claude Sonnet for everyday tasks, Claude Opus for deep analysis
+- Smart model routing: Claude Sonnet for everyday tasks, Claude Opus for deep analysis, Claude Haiku for background jobs

@@ -65,6 +65,8 @@ No preamble, no markdown, just the JSON object.`,
       },
     ],
     model: 'sonnet' as ModelSelection,
+    effort: 'low',
+    maxTokens: 4000,
   });
 
   try {
@@ -86,10 +88,60 @@ No preamble, no markdown, just the JSON object.`,
 }
 
 /**
+ * Documents that need a summary (missing, or stale vs current content), never
+ * anything in Scrivener's Trash. Pieces in the live manuscript (Scrivener's
+ * built-in Draft folder) come first so the book is indexed before salvage or
+ * notes, then larger pieces before smaller ones.
+ */
+export async function findDocumentsNeedingSummaries(
+  projectId: string,
+  limit: number
+): Promise<Array<{ id: string; title: string; content: string; content_hash: string | null }>> {
+  const result = await query<{
+    id: string;
+    title: string;
+    content: string;
+    content_hash: string | null;
+  }>(
+    `WITH RECURSIVE tree AS (
+       SELECT id,
+              CASE
+                WHEN metadata->>'scrivenerType' = 'TrashFolder'
+                  OR (is_folder AND lower(btrim(title)) = 'trash') THEN 'trash'
+                WHEN metadata->>'scrivenerType' = 'DraftFolder' THEN 'book'
+                ELSE 'other'
+              END AS area
+         FROM corpus_documents
+        WHERE project_id = $1 AND parent_id IS NULL
+       UNION ALL
+       SELECT c.id, t.area
+         FROM corpus_documents c
+         JOIN tree t ON c.parent_id = t.id
+     )
+     SELECT d.id, d.title, d.content, d.content_hash
+       FROM corpus_documents d
+       JOIN tree t ON t.id = d.id
+      WHERE d.project_id = $1
+        AND d.is_folder = false
+        AND d.content != ''
+        AND t.area <> 'trash'
+        AND (
+          d.metadata->>'summary' IS NULL
+          OR d.metadata->>'summaryHash' IS DISTINCT FROM d.content_hash
+        )
+      ORDER BY (t.area = 'book') DESC, d.word_count DESC NULLS LAST
+      LIMIT $2`,
+    [projectId, limit]
+  );
+  return result.rows;
+}
+
+/**
  * Ensure every non-folder document in a project has an up-to-date summary in
  * its metadata. Skips documents whose summary already matches the current
- * content_hash. Designed to be called fire-and-forget (after an import, or when
- * a coaching session starts); failures are logged, never thrown.
+ * content_hash, and anything in Trash. Designed to be called fire-and-forget
+ * (after an import, or when a coaching session starts); failures are logged,
+ * never thrown.
  *
  * @param maxDocs safety cap on how many summaries to generate per invocation.
  */
@@ -102,32 +154,13 @@ export async function ensureCorpusSummaries(
   inFlight.add(projectId);
 
   try {
-    // Find documents that need a summary (missing, or stale vs current content).
-    const stale = await query<{
-      id: string;
-      title: string;
-      content: string;
-      content_hash: string | null;
-    }>(
-      `SELECT id, title, content, content_hash
-       FROM corpus_documents
-       WHERE project_id = $1
-         AND is_folder = false
-         AND content != ''
-         AND (
-           metadata->>'summary' IS NULL
-           OR metadata->>'summaryHash' IS DISTINCT FROM content_hash
-         )
-       ORDER BY word_count DESC NULLS LAST
-       LIMIT $2`,
-      [projectId, maxDocs]
-    );
+    const stale = await findDocumentsNeedingSummaries(projectId, maxDocs);
 
-    if (stale.rows.length === 0) return;
+    if (stale.length === 0) return;
 
-    console.log(`[CorpusSummary] Generating ${stale.rows.length} summaries for project ${projectId}`);
+    console.log(`[CorpusSummary] Generating ${stale.length} summaries for project ${projectId}`);
 
-    for (const doc of stale.rows) {
+    for (const doc of stale) {
       try {
         const summarized = await summarizeDocument(doc.title || 'Untitled', doc.content);
         if (!summarized) continue;

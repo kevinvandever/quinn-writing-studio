@@ -7,12 +7,14 @@ import {
   determineModel,
   type ClaudeMessage,
   type ClaudeResponse,
+  type Effort,
   type ModelSelection,
   type ModelRoutingPreference,
   type ProjectContext,
   type SessionSummary,
   type TaskType,
 } from './claude-api.service.js';
+import { formatWriterDate } from '../utils/time.js';
 import { getEthicsPrompt, checkEthicsViolation, logEthicsBoundary } from './ethics.service.js';
 import { logApiUsage } from './usage-tracking.service.js';
 import { getRecentActivitySummary } from './activity.service.js';
@@ -227,6 +229,8 @@ ${contextParts.join('\n\n')}`;
         },
       ],
       model: 'sonnet' as ModelSelection,
+      effort: 'low',
+      maxTokens: 2000,
     });
 
     const opener = response.content.trim();
@@ -446,12 +450,22 @@ export async function sendSessionMessage(
   );
   const staleThreshold = userSettings.rows[0]?.stale_corpus_threshold_days ?? 7;
 
+  // Greeting-type instructions (welcome back, "you noticed their changes")
+  // belong only before Quinn's first reply in a session. Previously they were
+  // sent on every turn, so she could welcome the writer back again and again.
+  // The opener counts as a reply; static command replies (no model) don't.
+  const quinnHasReplied = allMessages.some(
+    (m) => m.role === 'assistant' && m.model_used !== null
+  );
+
   // Build activity context with welcome-back note if inactivity exceeds threshold
   let activityContext: string | null = null;
-  if (inactivityDays !== null && inactivityDays > staleThreshold) {
-    activityContext = `WELCOME BACK: It has been ${inactivityDays} days since the last coaching session for this project. The writer has been away for a while. Acknowledge their return warmly, ask what brought them back, and gently reconnect them with where they left off. Reference the previous session summaries to help them pick up the thread.`;
-  } else if (inactivityDays !== null && inactivityDays > 0) {
-    activityContext = `It has been ${inactivityDays} day${inactivityDays > 1 ? 's' : ''} since the last coaching session for this project.`;
+  if (!quinnHasReplied) {
+    if (inactivityDays !== null && inactivityDays > staleThreshold) {
+      activityContext = `WELCOME BACK: It has been ${inactivityDays} days since the last coaching session for this project. The writer has been away for a while. Acknowledge their return warmly, ask what brought them back, and gently reconnect them with where they left off. Reference the previous session summaries to help them pick up the thread.`;
+    } else if (inactivityDays !== null && inactivityDays > 0) {
+      activityContext = `It has been ${inactivityDays} day${inactivityDays > 1 ? 's' : ''} since the last coaching session for this project.`;
+    }
   }
 
   // Load recent activity summary and append to activity context
@@ -463,8 +477,11 @@ export async function sendSessionMessage(
   }
 
   // Load corpus changes since the last coaching session — so Quinn knows
-  // exactly what the writer added, revised, or removed in Scrivener.
-  const corpusChanges = await loadCorpusChangesSinceLastSession(session.project_id);
+  // exactly what the writer added, revised, or removed in Scrivener. After her
+  // first reply the list stays as reference, without the cue to acknowledge it.
+  const corpusChanges = await loadCorpusChangesSinceLastSession(session.project_id, {
+    acknowledge: !quinnHasReplied,
+  });
   if (corpusChanges) {
     activityContext = activityContext
       ? `${activityContext}\n\n${corpusChanges}`
@@ -511,6 +528,12 @@ export async function sendSessionMessage(
     routingDecision.model = 'opus';
     routingDecision.reason = 'Deep coaching mode — using Opus for fuller analysis';
   }
+
+  // Effort follows the task, not the model: workflows and deep modes get
+  // high, everyday conversation gets medium (Anthropic's recommended start for
+  // chat). This also controls how much the model thinks before answering.
+  const effort: Effort =
+    workflowPrefersOpus || taskType === 'theme_analysis' ? 'high' : 'medium';
 
   // Build combined activity context with Promptly context
   let combinedActivityContext = activityContext;
@@ -571,10 +594,25 @@ export async function sendSessionMessage(
     messages: conversationMessages,
     model: routingDecision.model,
     modelReason: routingDecision.reason,
+    effort,
   });
 
   // Wait for stream to complete
   const claudeResponse: ClaudeResponse = await promise;
+
+  // No text came back (the writer already saw an error). The tokens were still
+  // billed, so log them, but don't store an empty reply: it would break the
+  // next request, since the API rejects empty message content.
+  if (!claudeResponse.content.trim()) {
+    await logApiUsage(
+      userId,
+      claudeResponse.model,
+      taskType,
+      claudeResponse.inputTokens,
+      claudeResponse.outputTokens
+    );
+    return;
+  }
 
   // Persist assistant message
   await query(
@@ -682,11 +720,17 @@ Format your response as JSON: {"summary": "...", "next_steps": "..."}`,
         },
       ],
       model: 'sonnet' as ModelSelection,
+      // This is Quinn's only long-term memory of the session; worth some thought.
+      effort: 'medium',
     });
 
     summaryModel = summaryResponse.model;
     summaryInputTokens = summaryResponse.inputTokens;
     summaryOutputTokens = summaryResponse.outputTokens;
+
+    if (!summaryResponse.content.trim()) {
+      throw new Error('Summary response contained no text');
+    }
 
     try {
       const parsed = JSON.parse(extractJSON(summaryResponse.content));
@@ -701,7 +745,7 @@ Format your response as JSON: {"summary": "...", "next_steps": "..."}`,
     // Claude call failed — end the session anyway with a minimal fallback summary
     console.warn('[Coaching] Summary generation failed, ending session with fallback:', err instanceof Error ? err.message : err);
     const messageCount = messagesResult.rows.filter((m) => m.role === 'user' || m.role === 'assistant').length;
-    summary = `Session on ${new Date().toLocaleDateString()} with ${messageCount} messages exchanged. (Summary could not be generated automatically.)`;
+    summary = `Session on ${formatWriterDate(new Date())} with ${messageCount} messages exchanged. (Summary could not be generated automatically.)`;
     nextSteps = '';
   }
 
@@ -742,7 +786,10 @@ Format your response as JSON: {"summary": "...", "next_steps": "..."}`,
  * coaching session. This lets Quinn know exactly what changed in the
  * writer's manuscript since they last talked.
  */
-async function loadCorpusChangesSinceLastSession(projectId: string): Promise<string | null> {
+async function loadCorpusChangesSinceLastSession(
+  projectId: string,
+  options: { acknowledge: boolean } = { acknowledge: true }
+): Promise<string | null> {
   // Find when the last completed session ended
   const lastSession = await query<{ ended_at: Date }>(
     `SELECT ended_at FROM sessions
@@ -800,11 +847,12 @@ async function loadCorpusChangesSinceLastSession(projectId: string): Promise<str
     return null;
   }
 
-  const lines: string[] = [
-    since
+  const header = !options.acknowledge
+    ? "MANUSCRIPT CHANGES SINCE THE LAST SESSION (reference only; don't announce them again unless the writer brings them up):"
+    : since
       ? "CHANGES TO THE MANUSCRIPT SINCE YOUR LAST SESSION: The writer has been working in Scrivener. Here's exactly what changed. Acknowledge this naturally — you noticed their work."
-      : "RECENT MANUSCRIPT CHANGES: Here's what changed in the writer's most recent Scrivener sync.",
-  ];
+      : "RECENT MANUSCRIPT CHANGES: Here's what changed in the writer's most recent Scrivener sync.";
+  const lines: string[] = [header];
 
   if (added.size > 0) {
     lines.push(`\nNew pieces added:\n${[...added].map((t) => `- ${t}`).join('\n')}`);
@@ -994,11 +1042,14 @@ function folderRoleLabel(scrivenerType: string | null): string | null {
  * a complete structural map — every folder and document, with word counts and
  * folder roles — so Quinn always knows what exists, where it lives, and which
  * folder is the live manuscript versus research or trash. Cheap to include
- * because it carries titles and counts only, no document bodies.
+ * because it carries titles, counts, and loglines only, no document bodies.
+ *
+ * Trash is collapsed to a single line. Listing its contents used up the
+ * character cap, which cut off every folder after it in the binder.
  *
  * Returns null if the project has no Scrivener documents yet.
  */
-async function loadManuscriptMap(projectId: string): Promise<string | null> {
+export async function loadManuscriptMap(projectId: string): Promise<string | null> {
   const result = await query<{
     id: string;
     title: string;
@@ -1055,13 +1106,36 @@ async function loadManuscriptMap(projectId: string): Promise<string | null> {
   };
   sortNodes(roots);
 
-  // Tally totals so Quinn knows the true size of the binder (and won't assume
-  // there's hidden material when the list is actually complete).
+  const isTrash = (n: CorpusNode): boolean =>
+    n.scrivenerType === 'TrashFolder' ||
+    (n.isFolder && n.title.trim().toLowerCase() === 'trash');
+
+  // Count the documents (non-folders) anywhere beneath a node, and their words.
+  const countDocsUnder = (node: CorpusNode): number =>
+    node.children.reduce(
+      (sum, child) => sum + (child.isFolder ? 0 : 1) + countDocsUnder(child),
+      0
+    );
+  const countWordsUnder = (node: CorpusNode): number =>
+    node.children.reduce(
+      (sum, child) => sum + (child.isFolder ? 0 : child.wordCount) + countWordsUnder(child),
+      0
+    );
+
+  // Tally totals outside Trash so Quinn knows the true size of the binder (and
+  // won't assume there's hidden material when the list is actually complete).
   let folderCount = 0;
   let docCount = 0;
   let totalWords = 0;
+  let trashDocs = 0;
+  let trashWords = 0;
   const tally = (nodes: CorpusNode[]): void => {
     for (const n of nodes) {
+      if (isTrash(n)) {
+        trashDocs += countDocsUnder(n);
+        trashWords += countWordsUnder(n);
+        continue;
+      }
       if (n.isFolder) {
         folderCount++;
       } else {
@@ -1073,19 +1147,16 @@ async function loadManuscriptMap(projectId: string): Promise<string | null> {
   };
   tally(roots);
 
-  // Count the documents (non-folders) anywhere beneath a folder.
-  const countDocsUnder = (node: CorpusNode): number =>
-    node.children.reduce(
-      (sum, child) => sum + (child.isFolder ? 0 : 1) + countDocsUnder(child),
-      0
-    );
-
   // Render an indented outline.
+  const trashNote =
+    trashDocs > 0
+      ? ` Trash holds ${trashDocs} more (${trashWords.toLocaleString()} words), not listed.`
+      : '';
   const lines: string[] = [
-    `Binder contains ${folderCount} folder${folderCount === 1 ? '' : 's'} and ${docCount} document${docCount === 1 ? '' : 's'} (${totalWords.toLocaleString()} words total). This list is COMPLETE — every imported piece appears below. If a piece is not listed here, it has not been synced into this project (so don't claim hidden material exists when it doesn't, and don't invent pieces).`,
+    `Binder contains ${docCount} document${docCount === 1 ? '' : 's'} (${totalWords.toLocaleString()} words) in ${folderCount} folder${folderCount === 1 ? '' : 's'}, outside Trash.${trashNote} Every piece outside Trash appears below. If a piece is not listed here, it has not been synced into this project (so don't claim hidden material exists when it doesn't, and don't invent pieces).`,
     '',
   ];
-  const MAX_CHARS = 24000; // soft cap so an enormous binder can't dominate the prompt
+  const MAX_CHARS = 40000; // soft cap so an enormous binder can't dominate the prompt
   let truncated = false;
   let renderedChars = 0;
 
@@ -1096,6 +1167,12 @@ async function loadManuscriptMap(projectId: string): Promise<string | null> {
         return;
       }
       const indent = '  '.repeat(depth);
+      if (isTrash(node)) {
+        const line = `${indent}${node.title}/ [${folderRoleLabel('TrashFolder')}] — ${countDocsUnder(node)} pieces, ${countWordsUnder(node).toLocaleString()} words (contents not listed)`;
+        lines.push(line);
+        renderedChars += line.length + 1;
+        continue;
+      }
       let line: string;
       if (node.isFolder) {
         const role = folderRoleLabel(node.scrivenerType);

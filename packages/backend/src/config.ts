@@ -19,7 +19,22 @@ const envSchema = z.object({
   PORT: z.coerce.number().int().positive().default(3001),
   // Optional: you.com Search API key for web-search-based intelligence sources
   YOU_API_KEY: z.string().optional(),
+  // IANA time zone the writer lives in. The server runs in UTC, so dates and
+  // times shown to Quinn are converted to this zone.
+  WRITER_TIME_ZONE: z
+    .string()
+    .default('America/New_York')
+    .refine(isValidTimeZone, 'WRITER_TIME_ZONE must be an IANA time zone, e.g. America/New_York'),
 });
+
+function isValidTimeZone(timeZone: string): boolean {
+  try {
+    new Intl.DateTimeFormat('en-US', { timeZone });
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 export type Config = z.infer<typeof envSchema>;
 

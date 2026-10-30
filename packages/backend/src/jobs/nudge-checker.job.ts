@@ -48,14 +48,23 @@ export async function runNudgeChecker(userId: string): Promise<void> {
   const thresholds = settings.quietPeriodThresholds || DEFAULT_THRESHOLDS;
   const staleCorpusDays = settings.staleCorpusThresholdDays || DEFAULT_STALE_CORPUS_DAYS;
 
-  // Run all checks
-  await checkQuietPeriod(userId, thresholds);
-  await checkGoalsBehind(userId);
-  await checkDeadlineProximity(userId);
-  await checkStaleCorpus(userId, staleCorpusDays);
-  await checkGoalCompletions(userId);
+  // Run all checks. Each is isolated so one failure (an API outage, say)
+  // doesn't skip the checks after it.
+  await runCheck('quiet period', () => checkQuietPeriod(userId, thresholds));
+  await runCheck('goals behind', () => checkGoalsBehind(userId));
+  await runCheck('deadlines', () => checkDeadlineProximity(userId));
+  await runCheck('stale corpus', () => checkStaleCorpus(userId, staleCorpusDays));
+  await runCheck('goal completions', () => checkGoalCompletions(userId));
 
   console.log(`[NudgeChecker] Completed nudge checks for user ${userId}`);
+}
+
+async function runCheck(name: string, check: () => Promise<void>): Promise<void> {
+  try {
+    await check();
+  } catch (err) {
+    console.error(`[NudgeChecker] ${name} check failed:`, err instanceof Error ? err.message : err);
+  }
 }
 
 /**
@@ -119,32 +128,29 @@ async function checkQuietPeriod(
   );
 
   // Determine which threshold we've crossed
-  let nudgeType: NudgeType | null = null;
-  let urgency: NudgeUrgency = 'low';
+  let urgency: NudgeUrgency | null = null;
 
   if (daysSinceActivity >= thresholds.direct) {
-    nudgeType = 'quiet_period_direct';
-    urgency = 'high';
+    urgency = 'direct';
   } else if (daysSinceActivity >= thresholds.warm) {
-    nudgeType = 'quiet_period_warm';
-    urgency = 'medium';
+    urgency = 'warm';
   } else if (daysSinceActivity >= thresholds.gentle) {
-    nudgeType = 'quiet_period_gentle';
-    urgency = 'low';
+    urgency = 'gentle';
   }
 
-  if (!nudgeType) return;
+  if (!urgency) return;
 
-  // Check if we already sent this type of nudge recently (within 24 hours)
+  // Check if we already sent a quiet-period nudge at this level recently (within 24 hours)
   const recentNudge = await query<{ id: string }>(
     `SELECT id FROM nudges
-     WHERE user_id = $1 AND nudge_type = $2
+     WHERE user_id = $1 AND nudge_type = 'quiet_period' AND urgency = $2
        AND created_at > NOW() - INTERVAL '24 hours'`,
-    [userId, nudgeType]
+    [userId, urgency]
   );
 
   if (recentNudge.rows.length > 0) return;
 
+  const nudgeType: NudgeType = 'quiet_period';
   await generateAndStoreNudge({
     nudgeType,
     urgency,
@@ -188,7 +194,7 @@ async function checkGoalsBehind(userId: string): Promise<void> {
 
       await generateAndStoreNudge({
         nudgeType: 'goal_behind',
-        urgency: 'medium',
+        urgency: 'warm',
         userId,
         referenceId: goal.id,
         context: {
@@ -238,7 +244,7 @@ async function checkDeadlineProximity(userId: string): Promise<void> {
 
     if (recentNudge.rows.length > 0) continue;
 
-    const urgency: NudgeUrgency = daysUntilDue <= 3 ? 'high' : daysUntilDue <= 7 ? 'medium' : 'low';
+    const urgency: NudgeUrgency = daysUntilDue <= 3 ? 'direct' : daysUntilDue <= 7 ? 'warm' : 'gentle';
 
     await generateAndStoreNudge({
       nudgeType: 'deadline_approaching',
@@ -289,7 +295,7 @@ async function checkStaleCorpus(userId: string, thresholdDays: number): Promise<
 
   await generateAndStoreNudge({
     nudgeType: 'stale_corpus',
-    urgency: 'low',
+    urgency: 'gentle',
     userId,
     context: { daysSinceImport, lastImportDate: latestImport },
   });
@@ -308,15 +314,15 @@ async function checkGoalCompletions(userId: string): Promise<void> {
      WHERE p.user_id = $1 AND g.status = 'completed'
        AND NOT EXISTS (
          SELECT 1 FROM nudges n
-         WHERE n.user_id = $1 AND n.nudge_type = 'goal_celebration' AND n.reference_id = g.id
+         WHERE n.user_id = $1 AND n.nudge_type = 'celebration' AND n.reference_id = g.id
        )`,
     [userId]
   );
 
   for (const goal of result.rows) {
     await generateAndStoreNudge({
-      nudgeType: 'goal_celebration',
-      urgency: 'low',
+      nudgeType: 'celebration',
+      urgency: 'gentle',
       userId,
       referenceId: goal.id,
       context: { goalTitle: goal.title },

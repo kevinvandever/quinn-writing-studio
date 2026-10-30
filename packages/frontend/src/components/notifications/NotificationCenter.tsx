@@ -78,11 +78,12 @@ export function NotificationCenter() {
     }
   }
 
+  // Urgency values come from the nudge_urgency enum: gentle, warm, direct.
   function getUrgencyColor(urgency: string): string {
     switch (urgency) {
-      case 'high':
+      case 'direct':
         return 'border-l-red-400';
-      case 'medium':
+      case 'warm':
         return 'border-l-amber-400';
       default:
         return 'border-l-indigo-400';
@@ -91,9 +92,9 @@ export function NotificationCenter() {
 
   function getUrgencyIcon(urgency: string): string {
     switch (urgency) {
-      case 'high':
+      case 'direct':
         return '🔴';
-      case 'medium':
+      case 'warm':
         return '🟡';
       default:
         return '🔵';

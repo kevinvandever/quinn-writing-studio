@@ -9,16 +9,21 @@ import { query } from '../db/connection.js';
 import { sendMessage, type ModelSelection } from './claude-api.service.js';
 import { logApiUsage } from './usage-tracking.service.js';
 
+/**
+ * These must match the nudge_type and nudge_urgency enums in the database
+ * (migration 012). Urgency mirrors the quiet-period thresholds in settings
+ * (gentle/warm/direct). The code used to send other names ('quiet_period_gentle',
+ * 'low', 'goal_celebration'), which Postgres rejected, so no nudge was ever
+ * stored and the hourly check failed partway through every run.
+ */
 export type NudgeType =
-  | 'quiet_period_gentle'
-  | 'quiet_period_warm'
-  | 'quiet_period_direct'
+  | 'quiet_period'
   | 'goal_behind'
   | 'deadline_approaching'
   | 'stale_corpus'
-  | 'goal_celebration';
+  | 'celebration';
 
-export type NudgeUrgency = 'low' | 'medium' | 'high';
+export type NudgeUrgency = 'gentle' | 'warm' | 'direct';
 
 export interface NudgeContext {
   nudgeType: NudgeType;
@@ -28,22 +33,30 @@ export interface NudgeContext {
   context: Record<string, unknown>;
 }
 
-const NUDGE_PROMPTS: Record<NudgeType, string> = {
-  quiet_period_gentle:
+/** Quiet-period nudges escalate by urgency, so their prompt depends on it. */
+const QUIET_PERIOD_PROMPTS: Record<NudgeUrgency, string> = {
+  gentle:
     'The writer has been quiet for a few days. Generate a gentle, warm check-in message. Be curious about what they might be working on or thinking about. Keep it brief (1-2 sentences).',
-  quiet_period_warm:
+  warm:
     'The writer has been away for about a week. Generate a warm, encouraging message that acknowledges life gets busy while gently reminding them of their creative work. Keep it to 2-3 sentences.',
-  quiet_period_direct:
+  direct:
     'The writer has been away for two weeks or more. Generate a direct but compassionate message. Acknowledge the gap without guilt-tripping. Offer a small, achievable re-entry point. Keep it to 2-3 sentences.',
+};
+
+const NUDGE_PROMPTS: Record<Exclude<NudgeType, 'quiet_period'>, string> = {
   goal_behind:
     'The writer is falling behind on a goal. Generate an encouraging message that acknowledges the challenge while offering perspective. Mention the specific goal context provided. Keep it to 2-3 sentences.',
   deadline_approaching:
     'A deadline is approaching within 14 days. Generate a helpful reminder that creates urgency without anxiety. Mention the specific deadline context. Keep it to 2-3 sentences.',
   stale_corpus:
     'The writer\'s corpus hasn\'t been updated in a while. Generate a gentle reminder to import their latest work so coaching can be more relevant. Keep it to 1-2 sentences.',
-  goal_celebration:
+  celebration:
     'The writer has completed a goal! Generate a warm celebration message. Be genuinely enthusiastic but not over-the-top. Keep it to 2-3 sentences.',
 };
+
+function taskPromptFor(nudgeType: NudgeType, urgency: NudgeUrgency): string {
+  return nudgeType === 'quiet_period' ? QUIET_PERIOD_PROMPTS[urgency] : NUDGE_PROMPTS[nudgeType];
+}
 
 /**
  * Generate a nudge message using Claude with Quinn's persona and store it.
@@ -65,7 +78,7 @@ export async function generateAndStoreNudge(nudgeContext: NudgeContext): Promise
 
 Context about the situation: ${JSON.stringify(context)}`;
 
-  const taskPrompt = NUDGE_PROMPTS[nudgeType];
+  const taskPrompt = taskPromptFor(nudgeType, urgency);
 
   // Nudges are one to three sentences from a scheduled job: Haiku at low effort.
   const model: ModelSelection = 'haiku';

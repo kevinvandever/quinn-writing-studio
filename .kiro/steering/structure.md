@@ -27,6 +27,7 @@ quinn-writing-studio/
 │   │   │   │   ├── ethics.service.ts            # Writing ethics enforcement
 │   │   │   │   ├── scrivener-parser.service.ts  # .scriv import
 │   │   │   │   ├── scrivener-sync.service.ts    # Applies a parsed binder in place, keyed by Scrivener UUID (keeps summaries, earmarks, snapshots)
+│   │   │   │   ├── manuscript-context.service.ts # Full text of the book (Draft folder + front/back matter) for the cached prompt
 │   │   │   │   ├── substack-sync.service.ts     # RSS/API sync
 │   │   │   │   ├── theme-analysis.service.ts    # Cross-project themes
 │   │   │   │   ├── intelligence.service.ts      # Grant/news/publishing pipeline

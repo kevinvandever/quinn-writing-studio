@@ -42,6 +42,11 @@ export interface CoachingWorkflow {
   targetsSinglePiece?: boolean;
   /** Prefer Opus for this workflow when model routing is on auto. */
   preferOpus?: boolean;
+  /**
+   * Also give Quinn the full text of everything outside the manuscript
+   * (salvage, notes, research), for work that hunts for material to bring in.
+   */
+  readsWholeCorpus?: boolean;
   intro: string;
   steps: WorkflowStep[];
 }
@@ -57,6 +62,8 @@ export interface PromptCommand {
   targetsSinglePiece?: boolean;
   /** Prefer Opus for this mode when model routing is on auto. */
   preferOpus?: boolean;
+  /** See CoachingWorkflow.readsWholeCorpus. */
+  readsWholeCorpus?: boolean;
   /**
    * Include publishing opportunities from the Intelligence feed in context, so
    * suggestions point at real open calls rather than half-remembered journals.
@@ -76,6 +83,7 @@ const ESSAY_TRIAGE: CoachingWorkflow = {
     'Sort the collection against its central question — keep / cut / merge / revisit — then decide the "right number" and sequence the keepers (Muriel as capstone).',
   projectTypes: ['essay_collection'],
   preferOpus: true,
+  readsWholeCorpus: true,
   intro:
     "We'll triage the collection against your central question, cluster by cluster, then shape what stays into a book. I flag and reason; every call is yours. /next to advance, /exit to stop.",
   steps: [
@@ -83,7 +91,7 @@ const ESSAY_TRIAGE: CoachingWorkflow = {
       id: 'survey',
       title: 'Survey the collection',
       instruction:
-        "STEP 1 of 4 — SURVEY. Using the manuscript map and per-piece loglines, give the writer a clear lay of the land: how many pieces, how they're grouped (the parts/folders), and your first-pass read of which clearly serve the central question, which are uncertain, which feel like outliers or salvage. Note any hidden gems they may undervalue and any stories told more than once from different angles. Do NOT make final cut calls yet. End by asking which part or cluster to triage first. Do only this step.",
+        "STEP 1 of 4 — SURVEY. You have the full text of the manuscript and of the material outside it; work from the pieces themselves, using the map for structure. Give the writer a clear lay of the land: how many pieces, how they're grouped (the parts/folders), and your first-pass read of which clearly serve the central question, which are uncertain, which feel like outliers or salvage. Note any hidden gems they may undervalue and any stories told more than once from different angles. Do NOT make final cut calls yet. End by asking which part or cluster to triage first. Do only this step.",
     },
     {
       id: 'assess-cluster',
@@ -121,7 +129,7 @@ const EDITORIAL_PASS: CoachingWorkflow = {
       id: 'orient',
       title: 'Orient on the piece',
       instruction:
-        "STEP 1 of 4 — ORIENT. Confirm which piece you're working on; it should be loaded as FULL TEXT in the corpus context. If no piece is loaded in full, ask the writer to name it and stop there. Otherwise read it completely to understand the writer's intent, then reflect back what the piece is doing — its central move, its tension, its tone — so they know you read every word. Ask what they want from this pass: a specific worry, or a general read. Do only this step.",
+        "STEP 1 of 4 — ORIENT. Confirm which piece you're working on. Its full text is in The Manuscript section, or in the retrieved material if it lives outside the book. If you can't find it in either, ask the writer to name it and stop there. Otherwise read it completely to understand the writer's intent, then reflect back what the piece is doing — its central move, its tension, its tone — so they know you read every word. Ask what they want from this pass: a specific worry, or a general read. Do only this step.",
     },
     {
       id: 'structure',
@@ -155,8 +163,9 @@ const PROMPT_COMMANDS: PromptCommand[] = [
     label: 'Analyze Writing',
     description: 'Find connections, patterns, and themes across the corpus.',
     preferOpus: true,
+    readsWholeCorpus: true,
     instruction:
-      `Perform a deep analysis of the writer's corpus using the manuscript map and per-piece loglines (and any full texts loaded). Find connections across the work; identify patterns in themes, voice, and recurring topics; map the work to this project's central question (stated in the Active Project section above — if the project has no stated central question, map instead to its apparent purpose and recurring themes); uncover hidden gems the writer may undervalue; spot ideas covered more than once from different angles; and note how the voice has evolved. Be specific — cite pieces by name. Offer this as observations to explore together, not verdicts.`,
+      `Perform a deep analysis of the writer's corpus. You have the full text of the manuscript and of everything outside it (salvage, notes, research); read across all of it, using the map for structure. Find connections across the work; identify patterns in themes, voice, and recurring topics; map the work to this project's central question (stated in the Active Project section above — if the project has no stated central question, map instead to its apparent purpose and recurring themes); uncover hidden gems the writer may undervalue; spot ideas covered more than once from different angles; and note how the voice has evolved. Be specific — cite pieces by name. Offer this as observations to explore together, not verdicts.`,
   },
   {
     id: 'central-question',
@@ -176,7 +185,7 @@ const PROMPT_COMMANDS: PromptCommand[] = [
     preferOpus: true,
     includePublishingOpportunities: true,
     instruction:
-      `Identify which pieces are the strongest candidates to submit to literary journals right now. Work from the manuscript map (every piece, with word counts and loglines) and any full texts loaded. For each recommendation: name the piece, its word count, why it's ready (what's working, what makes it placeable), and any reservation. Rank them — the writer wants a shortlist to act on, not a survey of everything. Call out pieces that are close but need one specific revision first, and say what that revision is. Word count is a hard constraint at many journals, so state it for every candidate. If pieces are already reserved for submission (see First-Publication Rights, if present), account for that. Prefer specificity over encouragement: this list should be short enough to act on this week.`,
+      `Identify which pieces are the strongest candidates to submit to literary journals right now. Work from the full text of the manuscript, with the map for word counts. For each recommendation: name the piece, its word count, why it's ready (what's working, what makes it placeable), and any reservation. Rank them — the writer wants a shortlist to act on, not a survey of everything. Call out pieces that are close but need one specific revision first, and say what that revision is. Word count is a hard constraint at many journals, so state it for every candidate. If pieces are already reserved for submission (see First-Publication Rights, if present), account for that. Prefer specificity over encouragement: this list should be short enough to act on this week.`,
   },
   {
     id: 'place-this',
@@ -187,7 +196,7 @@ const PROMPT_COMMANDS: PromptCommand[] = [
     preferOpus: true,
     includePublishingOpportunities: true,
     instruction:
-      `Recommend where to submit the named piece. Its full text should be loaded in the corpus context; if it isn't, ask the writer to name it and stop. Then: (1) characterize what the piece actually is — length, register, subject, what kind of venue it suits; (2) recommend specific journals, drawing FIRST on the Publishing Opportunities list if present (real open calls with deadlines), then on well-established venues for personal essay and creative nonfiction; (3) for each, say why this piece fits that venue and note the word-count fit explicitly, since limits disqualify more submissions than quality does. Give a mixed slate — a couple of reaches, a few mid-tier, one or two likely — because simultaneous submissions are standard. Never invent a reading period, deadline, fee, or word limit: if you aren't certain, say the writer must confirm on the journal's site. Close with a concrete next action.`,
+      `Recommend where to submit the named piece. Its full text is in The Manuscript section, or in the retrieved material if it lives outside the book; if you can't find it, ask the writer to name it and stop. Then: (1) characterize what the piece actually is — length, register, subject, what kind of venue it suits; (2) recommend specific journals, drawing FIRST on the Publishing Opportunities list if present (real open calls with deadlines), then on well-established venues for personal essay and creative nonfiction; (3) for each, say why this piece fits that venue and note the word-count fit explicitly, since limits disqualify more submissions than quality does. Give a mixed slate — a couple of reaches, a few mid-tier, one or two likely — because simultaneous submissions are standard. Never invent a reading period, deadline, fee, or word limit: if you aren't certain, say the writer must confirm on the journal's site. Close with a concrete next action.`,
   },
   {
     id: 'coach',

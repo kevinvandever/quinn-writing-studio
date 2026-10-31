@@ -1,10 +1,13 @@
 import { Response } from 'express';
 import { query } from '../db/connection.js';
+import type Anthropic from '@anthropic-ai/sdk';
 import {
   sendMessage,
   streamToSSE,
-  assembleSystemPrompt,
+  assemblePrompt,
   determineModel,
+  totalInputTokens,
+  CACHE_1H,
   type ClaudeMessage,
   type ClaudeResponse,
   type Effort,
@@ -14,6 +17,7 @@ import {
   type SessionSummary,
   type TaskType,
 } from './claude-api.service.js';
+import { loadManuscriptContext } from './manuscript-context.service.js';
 import { formatWriterDate } from '../utils/time.js';
 import { getEthicsPrompt, checkEthicsViolation, logEthicsBoundary } from './ethics.service.js';
 import { logApiUsage } from './usage-tracking.service.js';
@@ -471,6 +475,7 @@ export async function sendSessionMessage(
   let commandContext: string | null = null;
   let commandForcedTitle: string | null = null;
   let commandPreferOpus = false;
+  let commandReadsWholeCorpus = false;
 
   if (content.trim().startsWith('/')) {
     const outcome = await handleSlashCommand(
@@ -490,6 +495,7 @@ export async function sendSessionMessage(
     commandContext = outcome.commandContext;
     commandForcedTitle = outcome.forcedTitle;
     commandPreferOpus = outcome.preferOpus;
+    commandReadsWholeCorpus = !!outcome.readsWholeCorpus;
   }
 
   // Load conversation history for this session
@@ -520,23 +526,35 @@ export async function sendSessionMessage(
     convoPairs.push({ role: 'user', content: claudeDirective });
   }
 
-  // Send as much of this session as fits a character budget, newest first.
-  // A sitting usually fits whole. When it doesn't, the system prompt says
-  // plainly that earlier messages are missing, so Quinn asks instead of
-  // pretending to remember. (This replaces a 20-message window that told her
-  // she had the dropped messages "in memory", which she didn't.)
+  // Send as much of this session as fits a character budget. A sitting usually
+  // fits whole. When it doesn't, the prompt says plainly that earlier messages
+  // are missing, so Quinn asks instead of pretending to remember. (This
+  // replaces a 20-message window that told her she had the dropped messages
+  // "in memory", which she didn't.)
+  // Old messages are dropped in chunks that end at fixed points in the
+  // session (every HISTORY_TRIM_CHARS of conversation), so the window's first
+  // message stays the same for many turns. Sliding it one message per turn
+  // would change the start of the history every turn, and the whole cached
+  // history would be rewritten to the prompt cache (at 2x input price) each
+  // time. The kept window ranges from about 80k to 120k characters.
   const HISTORY_CHAR_BUDGET = 120_000; // roughly 40k tokens
+  const HISTORY_TRIM_CHARS = 40_000;
   const MIN_RECENT_MESSAGES = 6; // always keep the latest exchanges, even if long
-  let keptCount = 0;
-  let keptChars = 0;
-  for (let i = convoPairs.length - 1; i >= 0; i--) {
-    const length = convoPairs[i]!.content.length;
-    if (keptCount >= MIN_RECENT_MESSAGES && keptChars + length > HISTORY_CHAR_BUDGET) break;
-    keptChars += length;
-    keptCount++;
+  const charsBefore: number[] = [0]; // charsBefore[i]: characters in messages 0..i-1
+  for (const m of convoPairs) charsBefore.push(charsBefore[charsBefore.length - 1]! + m.content.length);
+  const totalChars = charsBefore[convoPairs.length]!;
+  const latestStart = Math.max(0, convoPairs.length - MIN_RECENT_MESSAGES);
+  let historyStart = 0;
+  while (totalChars - charsBefore[historyStart]! > HISTORY_CHAR_BUDGET && historyStart < latestStart) {
+    // Move to the first message at or past the next chunk boundary.
+    const boundary =
+      (Math.floor(charsBefore[historyStart]! / HISTORY_TRIM_CHARS) + 1) * HISTORY_TRIM_CHARS;
+    let next = historyStart + 1;
+    while (next < latestStart && charsBefore[next]! < boundary) next++;
+    historyStart = next;
   }
-  let conversationMessages: ClaudeMessage[] = convoPairs.slice(convoPairs.length - keptCount);
-  const omittedCount = convoPairs.length - conversationMessages.length;
+  let conversationMessages: ClaudeMessage[] = convoPairs.slice(historyStart);
+  const omittedCount = historyStart;
   const conversationNote =
     omittedCount > 0
       ? `This session is long, so its first ${omittedCount} message${omittedCount === 1 ? '' : 's'} aren't included below. You don't have their text, so don't claim to remember them. If the writer refers to something from earlier in the session that you can't see, ask them to remind you.`
@@ -568,16 +586,34 @@ export async function sendSessionMessage(
   // Load session summaries for context
   const sessionSummaries = await loadSessionSummaries(session.project_id);
 
-  // Load corpus context — relevant documents based on the user's message,
-  // plus a baseline of documents for general awareness. A workflow or command
-  // targeting a single piece forces that piece's full text into context.
+  // The whole manuscript goes into the cached part of the prompt, so Quinn has
+  // read every piece in full on every turn. Whole-corpus modes (/analyze, essay
+  // triage) also get everything outside the book (salvage, notes, research).
+  const activeWorkflow = workflowState ? getWorkflow(workflowState.workflowId) : undefined;
+  const readsWholeCorpus = commandReadsWholeCorpus || !!activeWorkflow?.readsWholeCorpus;
+  const manuscript = await loadManuscriptContext(session.project_id, {
+    includeOutside: readsWholeCorpus,
+  });
+  const inCachedPrompt = new Set([...manuscript.bookIds, ...manuscript.outsideIds]);
+
+  // Projects without a Scrivener manuscript (Substack, Promptly) get opening
+  // excerpts of their documents instead, also in the cached part.
+  const corpusOverview = manuscript.bookText
+    ? { entries: [], ids: new Set<string>() }
+    : await loadCorpusOverview(session.project_id);
+
+  // Per-turn retrieval for this message: pieces named (or targeted by a
+  // workflow) and keyword matches, skipping anything already in the prompt.
   const forcedTitles = [workflowState?.targetPieceTitle, commandForcedTitle].filter(
     (t): t is string => !!t
   );
-  const corpusContext = await loadCorpusContext(session.project_id, content, forcedTitles);
+  const corpusContext = await loadCorpusContext(session.project_id, content, forcedTitles, {
+    inPrompt: inCachedPrompt,
+    excerptedInPrompt: corpusOverview.ids,
+  });
 
   // Load the full manuscript map (Scrivener binder structure) so Quinn always
-  // knows what exists and where, even when content excerpts are budget-limited.
+  // knows what exists and where, with a logline for every piece.
   const manuscriptMap = await loadManuscriptMap(session.project_id);
 
   // Check inactivity for context
@@ -659,11 +695,7 @@ export async function sendSessionMessage(
 
   // Heavy workflows and deep modes prefer Opus for fuller analysis — but only
   // when routing is on auto (an explicit always_sonnet preference still wins).
-  let workflowPrefersOpus = commandPreferOpus;
-  if (workflowState) {
-    const activeWfForModel = getWorkflow(workflowState.workflowId);
-    if (activeWfForModel?.preferOpus) workflowPrefersOpus = true;
-  }
+  const workflowPrefersOpus = commandPreferOpus || !!activeWorkflow?.preferOpus;
   if (workflowPrefersOpus && modelPreference === 'auto' && routingDecision.model !== 'opus') {
     routingDecision.model = 'opus';
     routingDecision.reason = 'Deep coaching mode — using Opus for fuller analysis';
@@ -674,14 +706,6 @@ export async function sendSessionMessage(
   // chat). This also controls how much the model thinks before answering.
   const effort: Effort =
     workflowPrefersOpus || taskType === 'theme_analysis' ? 'high' : 'medium';
-
-  // Build combined activity context with Promptly context
-  let combinedActivityContext = activityContext;
-  if (promptlyContext) {
-    combinedActivityContext = combinedActivityContext
-      ? `${combinedActivityContext}\n\n${promptlyContext}`
-      : promptlyContext;
-  }
 
   // First-publication rights: pieces reserved for journal submission, plus any
   // apparent Substack collisions. Null when nothing is earmarked.
@@ -699,40 +723,39 @@ export async function sendSessionMessage(
     );
   }
 
-  // Build the active-workflow system section (if a workflow is running).
-  let workflowContext: string | null = null;
-  if (workflowState) {
-    const activeWf = getWorkflow(workflowState.workflowId);
-    if (activeWf) {
-      workflowContext = buildWorkflowContext(activeWf, workflowState);
-    }
-  }
+  // Build the active-workflow section (if a workflow is running).
+  const workflowContext =
+    activeWorkflow && workflowState ? buildWorkflowContext(activeWorkflow, workflowState) : null;
 
-  // Assemble system prompt
-  const systemPrompt = assembleSystemPrompt({
+  // Assemble the prompt: two cached system blocks (the stable bulk, then the
+  // per-session part), plus per-turn context that rides with the writer's message.
+  const { system, turnContext } = assemblePrompt({
     personaConfig,
     projectContext: {
       name: project.name,
       centralQuestion: project.central_question,
       description: project.description,
     },
-    manuscriptMap,
-    firstRightsContext,
-    workflowContext,
-    commandContext,
-    sessionHistories: sessionSummaries,
-    conversationNote,
-    corpusContext,
-    activityContext: combinedActivityContext,
     taskInstructions: getTaskInstructions(taskType),
     ethicsPrompt: getEthicsPrompt(),
-    model: routingDecision.model,
+    manuscriptText: manuscript.bookText,
+    outsideText: manuscript.outsideText,
+    corpusOverview: corpusOverview.entries,
+    manuscriptMap,
+    firstRightsContext,
+    sessionHistories: sessionSummaries,
+    sessionContext: promptlyContext || null,
+    activityContext,
+    conversationNote,
+    workflowContext,
+    commandContext,
+    retrievedContext: corpusContext,
   });
 
   // Stream response via SSE
   const { promise } = streamToSSE(res, {
-    systemPrompt,
-    messages: conversationMessages,
+    systemPrompt: system,
+    messages: buildApiMessages(conversationMessages, turnContext),
     model: routingDecision.model,
     modelReason: routingDecision.reason,
     effort,
@@ -750,7 +773,8 @@ export async function sendSessionMessage(
       claudeResponse.model,
       taskType,
       claudeResponse.inputTokens,
-      claudeResponse.outputTokens
+      claudeResponse.outputTokens,
+      claudeResponse.cache
     );
     return;
   }
@@ -764,7 +788,7 @@ export async function sendSessionMessage(
       claudeResponse.content,
       claudeResponse.model,
       routingDecision.reason,
-      claudeResponse.inputTokens,
+      totalInputTokens(claudeResponse),
       claudeResponse.outputTokens,
     ]
   );
@@ -775,13 +799,58 @@ export async function sendSessionMessage(
     claudeResponse.model,
     taskType,
     claudeResponse.inputTokens,
-    claudeResponse.outputTokens
+    claudeResponse.outputTokens,
+    claudeResponse.cache
   );
 
   // Check ethics violations
   if (checkEthicsViolation(claudeResponse.content)) {
     await logEthicsBoundary(userId, sessionId, content, claudeResponse.content);
   }
+}
+
+/**
+ * Turn the conversation into API messages for a cached request:
+ * - a one-hour cache breakpoint on Quinn's last reply, so next turn the
+ *   history up to here is read from cache instead of reprocessed;
+ * - this turn's context attached to the writer's newest message. It sits after
+ *   every breakpoint, so it can change each turn without breaking the cache,
+ *   and it's framed so Quinn doesn't take it for the writer's own words.
+ */
+function buildApiMessages(
+  conversation: ClaudeMessage[],
+  turnContext: string
+): Anthropic.Messages.MessageParam[] {
+  const messages: Anthropic.Messages.MessageParam[] = conversation.map((m) => ({
+    role: m.role,
+    content: m.content,
+  }));
+
+  for (let i = conversation.length - 2; i >= 0; i--) {
+    const message = conversation[i]!;
+    if (message.role === 'assistant' && message.content.trim()) {
+      messages[i] = {
+        role: 'assistant',
+        content: [{ type: 'text', text: message.content, cache_control: CACHE_1H }],
+      };
+      break;
+    }
+  }
+
+  const contextBlock: Anthropic.Messages.TextBlockParam = {
+    type: 'text',
+    text: `<turn_context>\nContext from the Quinn app for this turn only. The writer didn't type this; use it, but don't mention it or reply to it.\n\n${turnContext}\n</turn_context>`,
+  };
+  const last = conversation[conversation.length - 1];
+  if (last && last.role === 'user') {
+    messages[messages.length - 1] = {
+      role: 'user',
+      content: [contextBlock, { type: 'text', text: last.content }],
+    };
+  } else {
+    messages.push({ role: 'user', content: [contextBlock] });
+  }
+  return messages;
 }
 
 // ─── End Session ─────────────────────────────────────────────────────────────
@@ -1247,8 +1316,15 @@ export async function loadManuscriptMap(projectId: string): Promise<string | nul
     }
   }
 
+  // Fully deterministic (ties broken by title, then id): the map sits in the
+  // cached prompt, so its text must not change between turns.
   const sortNodes = (nodes: CorpusNode[]): void => {
-    nodes.sort((a, b) => a.sortOrder - b.sortOrder);
+    nodes.sort(
+      (a, b) =>
+        a.sortOrder - b.sortOrder ||
+        a.title.localeCompare(b.title, 'en') ||
+        (a.id < b.id ? -1 : a.id > b.id ? 1 : 0)
+    );
     for (const n of nodes) sortNodes(n.children);
   };
   sortNodes(roots);
@@ -1442,7 +1518,8 @@ async function loadNamedDocuments(
   projectId: string,
   userMessage: string | undefined,
   forcedTitles: string[],
-  trashIds: Set<string>
+  trashIds: Set<string>,
+  excludeIds: Set<string>
 ): Promise<Array<{ id: string; title: string; content: string }>> {
   // Pull titles only (cheap) to decide what to match before fetching bodies.
   const titlesResult = await query<{ id: string; title: string }>(
@@ -1456,7 +1533,8 @@ async function loadNamedDocuments(
 
   const matchedIds: string[] = [];
   for (const row of titlesResult.rows) {
-    if (trashIds.has(row.id)) continue;
+    // Trash is never surfaced; pieces already in the cached prompt aren't repeated.
+    if (trashIds.has(row.id) || excludeIds.has(row.id)) continue;
     const title = (row.title ?? '').trim();
     if (title.length < 4) continue; // too short to match safely
     const titleLower = title.toLowerCase();
@@ -1482,30 +1560,31 @@ async function loadNamedDocuments(
 }
 
 /**
- * Load corpus context (document excerpts) for the project.
+ * Load per-turn corpus material for the writer's message.
  *
- * Three strategies, in priority order:
+ * Two strategies, in priority order:
  * 0. Named: documents the writer references by title (or a workflow forces) are
  *    loaded as FULL text, not excerpts, so deep work on a specific piece is exact.
  * 1. Relevance: documents whose title or content matches keywords in the
  *    user's current message (so asking about a topic surfaces related pieces).
- * 2. Baseline: documents in true binder order, so Quinn has general awareness
- *    of the manuscript even for vague messages.
  *
- * Trash is always excluded. Entries are ordered named-first, then relevant, then
- * baseline; the system prompt's token budget decides how many actually fit.
+ * Nothing is sent twice: `inPrompt` documents (the full manuscript, and in
+ * whole-corpus modes everything outside it) are skipped entirely, and
+ * `excerptedInPrompt` documents (the overview excerpts) are skipped by keyword
+ * matching but still loaded in full when named. Trash is always excluded.
  */
 async function loadCorpusContext(
   projectId: string,
-  userMessage?: string,
-  forcedTitles: string[] = []
+  userMessage: string | undefined,
+  forcedTitles: string[],
+  already: { inPrompt: Set<string>; excerptedInPrompt: Set<string> }
 ): Promise<string[]> {
-  const seen = new Set<string>();
+  const seen = new Set<string>(already.inPrompt);
   const docs: Array<{ title: string; content: string; full?: boolean }> = [];
   const trashIds = await loadTrashDocumentIds(projectId);
 
   // 0. Named / forced documents — full text, highest priority.
-  const named = await loadNamedDocuments(projectId, userMessage, forcedTitles, trashIds);
+  const named = await loadNamedDocuments(projectId, userMessage, forcedTitles, trashIds, already.inPrompt);
   const MAX_NAMED_CHARS = 24000; // ~4-5k words; covers a long essay in full
   for (const d of named) {
     if (seen.has(d.id)) continue;
@@ -1549,59 +1628,67 @@ async function loadCorpusContext(
 
         for (const row of relevant.rows) {
           if (trashIds.has(row.id)) continue; // never surface deleted work
-          if (!seen.has(row.id)) {
+          if (already.excerptedInPrompt.has(row.id)) continue; // its excerpt is already there
+          if (!seen.has(row.id)) { // also skips pieces already in full in the prompt
             seen.add(row.id);
             docs.push({ title: row.title, content: row.content });
           }
         }
       } catch (err) {
         // Full-text query can fail on malformed input — fall through to baseline
-        console.warn('[Corpus] Relevance search failed, using baseline only:', err instanceof Error ? err.message : err);
+        console.warn('[Corpus] Relevance search failed:', err instanceof Error ? err.message : err);
       }
     }
   }
 
-  // 2. Baseline documents (excluding trash). Scrivener projects use true binder
-  // order; non-Scrivener projects (Substack/Promptly) have no binder, so their
-  // docs are ordered by recency. Combine so mixed or either-type projects work.
+  return docs.map(formatCorpusEntry);
+}
+
+function formatCorpusEntry(doc: { title: string; content: string; full?: boolean }): string {
+  if (doc.full) {
+    return `### ${doc.title} (FULL TEXT)\n${doc.content}`;
+  }
+  const excerpt = doc.content.length > 3000 ? doc.content.slice(0, 3000) + '...' : doc.content;
+  return `### ${doc.title}\n${excerpt}`;
+}
+
+/**
+ * Opening excerpts of the project's documents, for projects without a
+ * Scrivener manuscript (Substack, Promptly). Scrivener documents come in binder
+ * order, others by recency. Deterministic, so it can sit in the cached prompt.
+ */
+async function loadCorpusOverview(
+  projectId: string
+): Promise<{ entries: string[]; ids: Set<string> }> {
   const BASELINE_LIMIT = 40;
+  const trashIds = await loadTrashDocumentIds(projectId);
   const scrivenerLeafIds = await loadBinderLeafOrder(projectId, trashIds);
   const nonScrivener = await query<{ id: string }>(
     `SELECT id FROM corpus_documents
      WHERE project_id = $1 AND source_type != 'scrivener' AND is_folder = false AND content != ''
-     ORDER BY updated_at DESC
+     ORDER BY updated_at DESC, id
      LIMIT $2`,
     [projectId, BASELINE_LIMIT]
   );
-  const orderedBaseline = [...scrivenerLeafIds, ...nonScrivener.rows.map((r) => r.id)];
-  const baselineIds = orderedBaseline.filter((id) => !seen.has(id)).slice(0, BASELINE_LIMIT);
+  const baselineIds = [...scrivenerLeafIds, ...nonScrivener.rows.map((r) => r.id)].slice(
+    0,
+    BASELINE_LIMIT
+  );
+  if (baselineIds.length === 0) return { entries: [], ids: new Set() };
 
-  if (baselineIds.length > 0) {
-    const baseline = await query<{ id: string; title: string; content: string }>(
-      `SELECT id, title, content FROM corpus_documents
-       WHERE id = ANY($1::uuid[]) AND content != ''`,
-      [baselineIds]
-    );
-    const byId = new Map(baseline.rows.map((r) => [r.id, r]));
-    // Preserve the combined order from baselineIds
-    for (const id of baselineIds) {
-      const row = byId.get(id);
-      if (row && !seen.has(id)) {
-        seen.add(id);
-        docs.push({ title: row.title, content: row.content });
-      }
-    }
-  }
-
-  return docs.map((doc) => {
-    if (doc.full) {
-      return `### ${doc.title} (FULL TEXT)\n${doc.content}`;
-    }
-    const excerpt = doc.content.length > 3000
-      ? doc.content.slice(0, 3000) + '...'
-      : doc.content;
-    return `### ${doc.title}\n${excerpt}`;
-  });
+  const baseline = await query<{ id: string; title: string; content: string }>(
+    `SELECT id, title, content FROM corpus_documents
+     WHERE id = ANY($1::uuid[]) AND content != ''`,
+    [baselineIds]
+  );
+  const byId = new Map(baseline.rows.map((r) => [r.id, r]));
+  const rows = baselineIds
+    .map((id) => byId.get(id))
+    .filter((row): row is { id: string; title: string; content: string } => !!row);
+  return {
+    entries: rows.map((row) => formatCorpusEntry({ title: row.title, content: row.content })),
+    ids: new Set(rows.map((row) => row.id)),
+  };
 }
 
 // ─── Workflow Engine ───────────────────────────────────────────────────────
@@ -1734,7 +1821,7 @@ function buildWorkflowContext(wf: CoachingWorkflow, state: WorkflowState): strin
     `You are running a structured workflow with the writer. Do ONLY the current step below, then stop and let them respond. When the step feels complete, briefly note they can say /next to continue (or /exit to stop). Never race ahead to later steps. This structure guides you — it is not a script to read aloud; stay fully in your own coaching voice.`,
   ];
   if (state.targetPieceTitle) {
-    parts.push(`Working piece: "${state.targetPieceTitle}" — its full text should be loaded in the corpus context below.`);
+    parts.push(`Working piece: "${state.targetPieceTitle}" — its full text is in The Manuscript section, or in the retrieved material if it lives outside the book.`);
   }
   parts.push(`CURRENT STEP — ${step.title}:\n${step.instruction}`);
   return parts.join('\n\n');
@@ -1747,7 +1834,7 @@ function buildPromptCommandContext(cmd: PromptCommand, targetPieceTitle: string 
     `The writer invoked this mode. Carry it out now, in your own coaching voice (this is guidance, not a script to read aloud):`,
   ];
   if (targetPieceTitle) {
-    parts.push(`Piece in focus: "${targetPieceTitle}" — its full text should be loaded in the corpus context below.`);
+    parts.push(`Piece in focus: "${targetPieceTitle}" — its full text is in The Manuscript section, or in the retrieved material if it lives outside the book.`);
   }
   parts.push(cmd.instruction);
   return parts.join('\n\n');
@@ -1762,6 +1849,8 @@ function buildPromptCommandContext(cmd: PromptCommand, targetPieceTitle: string 
  */
 interface CommandOutcome {
   handledStatically: boolean;
+  /** The one-shot mode needs everything outside the manuscript too. */
+  readsWholeCorpus?: boolean;
   workflowState: WorkflowState | null;
   claudeDirective: string | null;
   commandContext: string | null;
@@ -1929,6 +2018,7 @@ async function handleSlashCommand(
       commandContext: context,
       forcedTitle,
       preferOpus: !!promptCmd.preferOpus,
+      readsWholeCorpus: !!promptCmd.readsWholeCorpus,
     };
   }
 

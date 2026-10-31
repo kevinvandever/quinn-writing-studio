@@ -35,13 +35,50 @@ export interface ClaudeMessage {
   content: string;
 }
 
+/** A system prompt: plain text, or text blocks that can carry cache breakpoints. */
+export type SystemPrompt = string | Anthropic.Messages.TextBlockParam[];
+
+/** Prompt-cache token counts from a response's usage. */
+export interface CacheUsage {
+  readTokens: number;
+  write5mTokens: number;
+  write1hTokens: number;
+}
+
 export interface ClaudeResponse {
   content: string;
   model: ModelSelection;
   reason: string;
+  /** Uncached input tokens (after the last cache breakpoint). */
   inputTokens: number;
   outputTokens: number;
+  cache: CacheUsage;
 }
+
+/** Input tokens of every kind: uncached, written to cache, and read from cache. */
+export function totalInputTokens(response: ClaudeResponse): number {
+  return (
+    response.inputTokens +
+    response.cache.readTokens +
+    response.cache.write5mTokens +
+    response.cache.write1hTokens
+  );
+}
+
+function cacheUsageFrom(usage: Anthropic.Messages.Usage): CacheUsage {
+  const breakdown = usage.cache_creation;
+  return {
+    readTokens: usage.cache_read_input_tokens ?? 0,
+    // Without a TTL breakdown, count every write as 1h, the TTL Quinn requests.
+    write5mTokens: breakdown ? breakdown.ephemeral_5m_input_tokens ?? 0 : 0,
+    write1hTokens: breakdown
+      ? breakdown.ephemeral_1h_input_tokens ?? 0
+      : usage.cache_creation_input_tokens ?? 0,
+  };
+}
+
+/** One-hour prompt-cache breakpoint. Writers pause longer than the 5-minute default. */
+export const CACHE_1H: Anthropic.Messages.CacheControlEphemeral = { type: 'ephemeral', ttl: '1h' };
 
 export interface ModelRoutingDecision {
   model: ModelSelection;
@@ -55,7 +92,7 @@ export interface ContextMetadata {
 }
 
 export interface SendMessageOptions {
-  systemPrompt: string;
+  systemPrompt: SystemPrompt;
   messages: ClaudeMessage[];
   model: ModelSelection;
   /** Defaults to 'low': non-streaming calls are background or short tasks. */
@@ -148,6 +185,7 @@ export async function sendMessage(
       reason: '',
       inputTokens,
       outputTokens,
+      cache: cacheUsageFrom(finalMessage.usage),
     };
   } else {
     // Non-streaming mode
@@ -175,6 +213,7 @@ export async function sendMessage(
       reason: '',
       inputTokens: response.usage.input_tokens,
       outputTokens: response.usage.output_tokens,
+      cache: cacheUsageFrom(response.usage),
     };
   }
 }
@@ -190,8 +229,9 @@ export async function sendMessage(
 export function streamToSSE(
   res: Response,
   options: {
-    systemPrompt: string;
-    messages: ClaudeMessage[];
+    systemPrompt: SystemPrompt;
+    /** May carry content blocks (e.g. a cache breakpoint, or per-turn context). */
+    messages: Anthropic.Messages.MessageParam[];
     model: ModelSelection;
     modelReason: string;
     effort: Effort;
@@ -275,10 +315,7 @@ export function streamToSSE(
         max_tokens: COACHING_MAX_TOKENS,
         output_config: { effort },
         system: systemPrompt,
-        messages: messages.map((m) => ({
-          role: m.role,
-          content: m.content,
-        })),
+        messages,
       });
       currentStream = stream;
 
@@ -331,6 +368,7 @@ export function streamToSSE(
               reason: modelReason,
               inputTokens: finalMessage.usage.input_tokens,
               outputTokens: finalMessage.usage.output_tokens,
+              cache: cacheUsageFrom(finalMessage.usage),
             };
 
             if (finalMessage.stop_reason === 'max_tokens') {
@@ -354,7 +392,7 @@ export function streamToSSE(
 
             finish({
               name: 'done',
-              data: { inputTokens: response.inputTokens, outputTokens: response.outputTokens },
+              data: { inputTokens: totalInputTokens(response), outputTokens: response.outputTokens },
             });
             resolve(response);
           })
@@ -484,17 +522,6 @@ export function determineModel(
 
 // ─── System Prompt Assembly ──────────────────────────────────────────────────
 
-/**
- * System-prompt budget per model, in characters. The 5.x models' tokenizer
- * averages roughly 3 characters per token for prose, so 128k chars is about
- * 40k tokens and 256k about 85k.
- */
-const TOKEN_BUDGET: Record<ModelSelection, number> = {
-  sonnet: 32000 * 4, // 128k chars
-  opus: 64000 * 4, // 256k chars
-  haiku: 32000 * 4, // not used for coaching prompts
-};
-
 export interface ProjectContext {
   name: string;
   centralQuestion: string | null;
@@ -507,21 +534,41 @@ export interface SessionSummary {
   startedAt: Date;
 }
 
+/** Per-turn budget for retrieved material that isn't already in the cached prompt. */
+const RETRIEVED_CHAR_BUDGET = 60_000;
+
 export interface AssemblePromptOptions {
+  // ── Stable for the session: cached ──
   personaConfig: Record<string, unknown>;
   projectContext: ProjectContext;
-  manuscriptMap: string | null;
-  firstRightsContext: string | null;
-  workflowContext: string | null;
-  commandContext: string | null;
-  sessionHistories: SessionSummary[];
-  /** Set when early messages of the current session were left out of the request. */
-  conversationNote?: string | null;
-  corpusContext: string[];
-  activityContext: string | null;
   taskInstructions: string;
   ethicsPrompt: string;
-  model: ModelSelection;
+  /** Full text of the book (Scrivener's Draft folder), when the project has one. */
+  manuscriptText: string | null;
+  /** Full text of material outside the book, for whole-corpus modes. */
+  outsideText: string | null;
+  /** Excerpts that stand in for the corpus when there's no Scrivener book (Substack, Promptly). */
+  corpusOverview: string[];
+  manuscriptMap: string | null;
+  firstRightsContext: string | null;
+  sessionHistories: SessionSummary[];
+  /** Other context that holds for the whole session (e.g. the Promptly story being worked on). */
+  sessionContext: string | null;
+  // ── Changes every turn: sent with the writer's message, not cached ──
+  activityContext: string | null;
+  /** Set when early messages of the current session were left out of the request. */
+  conversationNote: string | null;
+  workflowContext: string | null;
+  commandContext: string | null;
+  /** Material matched to this message that isn't already in the cached prompt. */
+  retrievedContext: string[];
+}
+
+export interface AssembledPrompt {
+  /** System prompt blocks, each ending at a one-hour cache breakpoint. */
+  system: Anthropic.Messages.TextBlockParam[];
+  /** Context for this turn only, to send alongside the writer's message. */
+  turnContext: string;
 }
 
 /**
@@ -533,111 +580,74 @@ function truncateToFit(text: string, budget: number): string {
 }
 
 /**
- * Assemble the full system prompt for a Claude API request.
+ * Assemble Quinn's prompt in cache-friendly order: stable parts first, so the
+ * large prefix is written to the prompt cache once and read cheaply after.
  *
- * Includes:
- * - Persona configuration (identity, voice, principles, expertise, ethics)
- * - Project context (name, central question, description)
- * - Session history summaries (recent ended sessions)
- * - A note when early messages of this session were left out
- * - Relevant corpus context (truncated to the character budget)
- * - Activity context
- * - Task-specific instructions
- * - Ethics enforcement
- *
- * Character budget per model: see TOKEN_BUDGET.
+ * Block 1 (cached): persona, ethics, task protocol, project brief, the full
+ *   manuscript, and (for whole-corpus modes) everything outside it. This is
+ *   the large part and only changes after a Scrivener sync.
+ * Block 2 (cached): binder map with loglines, first-publication rights,
+ *   Session Memory, session context. Changes when summaries or sessions do.
+ * Turn context (not cached): date and time, activity, workflow step or
+ *   command, and retrieved material for this message. It goes in the user
+ *   turn, so it can change every turn without invalidating the cached prefix
+ *   or the cached conversation history after it.
  */
-export function assembleSystemPrompt(options: AssemblePromptOptions): string {
-  const {
-    personaConfig,
-    projectContext,
-    manuscriptMap,
-    firstRightsContext,
-    workflowContext,
-    commandContext,
-    sessionHistories,
-    conversationNote,
-    corpusContext,
-    activityContext,
-    taskInstructions,
-    ethicsPrompt,
-    model,
-  } = options;
-
-  const budget = TOKEN_BUDGET[model];
-  const sections: string[] = [];
-
-  // 0. Current date/time context, in the writer's time zone (the server runs in UTC)
-  const now = new Date();
-  sections.push(`## Current Date and Time\n${formatWriterDate(now)}, ${formatWriterTime(now)} (the writer's local time)\n\nUse this naturally in conversation when relevant — acknowledge gaps between sessions, reference time of day, etc.`);
-
-  // 1. Persona configuration
-  const personaSection = buildPersonaSection(personaConfig);
-  sections.push(personaSection);
-
-  // 2. Ethics enforcement (always included)
-  sections.push(`## Ethics Enforcement\n${ethicsPrompt}`);
-
-  // 3. Project context
-  const projectSection = buildProjectSection(projectContext);
-  sections.push(projectSection);
-
-  // 3a. First-publication rights — pieces reserved for journal submission, and
-  // any apparent Substack collisions. Placed before the map so the constraint is
-  // read before Quinn reasons about the manuscript.
-  if (firstRightsContext) {
-    sections.push(firstRightsContext);
-  }
-
-  // 3b. Manuscript structure map (full Scrivener binder — always included so
-  // Quinn knows everything that exists and where, regardless of corpus excerpts)
-  if (manuscriptMap) {
-    sections.push(
-      `## Manuscript Structure (Scrivener binder)\nThis is the writer's complete Scrivener binder as of the latest sync — your map of what exists and where. Indentation shows folder nesting; word counts reflect the most recent sync. Folder roles: [DRAFT] is the live manuscript, [RESEARCH] is notes/source material, [TRASH] is deleted (ignore unless the writer asks). Use this to locate and reference specific pieces accurately. Never claim a piece doesn't exist if it appears here, and don't invent pieces that don't.\n\n${manuscriptMap}`
+export function assemblePrompt(options: AssemblePromptOptions): AssembledPrompt {
+  const stable: string[] = [
+    buildPersonaSection(options.personaConfig),
+    `## Ethics Enforcement\n${options.ethicsPrompt}`,
+    `## Current Task Instructions\n${options.taskInstructions}`,
+    buildProjectSection(options.projectContext),
+  ];
+  if (options.manuscriptText) stable.push(options.manuscriptText);
+  if (options.outsideText) stable.push(options.outsideText);
+  if (options.corpusOverview.length > 0) {
+    stable.push(
+      `## Corpus Overview\nOpening excerpts of this project's documents, most recent first. Ask for a piece by name if you need all of it.\n\n${options.corpusOverview.join('\n\n')}`
     );
   }
 
-  // 4. Session history summaries (recent ended sessions)
-  if (sessionHistories.length > 0) {
-    const historySection = buildSessionHistorySection(sessionHistories);
-    sections.push(historySection);
+  const session: string[] = [];
+  if (options.manuscriptMap) {
+    session.push(
+      `## Manuscript Structure (Scrivener binder)\nThis is the writer's complete Scrivener binder as of the latest sync — your map of what exists and where. Indentation shows folder nesting; word counts reflect the most recent sync. Folder roles: [DRAFT] is the live manuscript, [RESEARCH] is notes/source material, [TRASH] is deleted (ignore unless the writer asks). Use this to locate and reference specific pieces accurately. Never claim a piece doesn't exist if it appears here, and don't invent pieces that don't.\n\n${options.manuscriptMap}`
+    );
+  }
+  // First-publication rights — pieces reserved for journal submission, and any
+  // apparent Substack collisions.
+  if (options.firstRightsContext) session.push(options.firstRightsContext);
+  if (options.sessionHistories.length > 0) {
+    session.push(buildSessionHistorySection(options.sessionHistories));
+  }
+  if (options.sessionContext) session.push(options.sessionContext);
+
+  // Date and time in the writer's time zone (the server runs in UTC)
+  const now = new Date();
+  const turn: string[] = [
+    `## Current Date and Time\n${formatWriterDate(now)}, ${formatWriterTime(now)} (the writer's local time)\n\nUse this naturally in conversation when relevant — acknowledge gaps between sessions, reference time of day, etc.`,
+  ];
+  if (options.activityContext) turn.push(`## Recent Activity\n${options.activityContext}`);
+  if (options.conversationNote) turn.push(`## Earlier in This Session\n${options.conversationNote}`);
+  // An active workflow step takes precedence over the general task
+  // instructions: Quinn should focus on the current step only.
+  if (options.workflowContext) turn.push(options.workflowContext);
+  // One-shot prompt command (Analyze, Central Question, etc.) for this turn.
+  if (options.commandContext) turn.push(options.commandContext);
+  if (options.retrievedContext.length > 0) {
+    turn.push(
+      buildRetrievedSection(options.retrievedContext, RETRIEVED_CHAR_BUDGET, !!options.manuscriptText)
+    );
   }
 
-  // 4b. Honest note when this session's early messages aren't in the request
-  if (conversationNote) {
-    sections.push(`## Earlier in This Session\n${conversationNote}`);
+  const system: Anthropic.Messages.TextBlockParam[] = [
+    { type: 'text', text: stable.join('\n\n'), cache_control: CACHE_1H },
+  ];
+  if (session.length > 0) {
+    system.push({ type: 'text', text: session.join('\n\n'), cache_control: CACHE_1H });
   }
 
-  // 5. Activity context
-  if (activityContext) {
-    sections.push(`## Recent Activity\n${activityContext}`);
-  }
-
-  // 6. Task-specific instructions
-  sections.push(`## Current Task Instructions\n${taskInstructions}`);
-
-  // 6b. Active workflow (if running) — this takes precedence over the general
-  // task instructions: Quinn should focus on the current step only.
-  if (workflowContext) {
-    sections.push(workflowContext);
-  }
-
-  // 6c. One-shot prompt command (Analyze, Central Question, etc.) for this turn.
-  if (commandContext) {
-    sections.push(commandContext);
-  }
-
-  // Calculate remaining budget for corpus context
-  const currentLength = sections.join('\n\n').length;
-  const remainingBudget = Math.max(0, budget - currentLength - 200); // 200 char buffer
-
-  // 7. Corpus context (truncated to remaining budget)
-  if (corpusContext.length > 0 && remainingBudget > 100) {
-    const corpusSection = buildCorpusSection(corpusContext, remainingBudget);
-    sections.push(corpusSection);
-  }
-
-  return sections.join('\n\n');
+  return { system, turnContext: turn.join('\n\n') };
 }
 
 function buildPersonaSection(personaConfig: Record<string, unknown>): string {
@@ -791,11 +801,14 @@ function buildSessionHistorySection(sessions: SessionSummary[]): string {
   return lines.join('\n');
 }
 
-function buildCorpusSection(
+function buildRetrievedSection(
   corpusContext: string[],
-  budget: number
+  budget: number,
+  hasManuscript: boolean
 ): string {
-  const header = '## Relevant Corpus Context\n';
+  const header = hasManuscript
+    ? "## Retrieved Material (outside the manuscript)\nPieces from elsewhere in the binder that match this message. They aren't part of the book.\n\n"
+    : '## Relevant Corpus Context\n';
   let content = '';
   let remaining = budget - header.length;
 

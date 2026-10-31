@@ -136,6 +136,7 @@ export async function detectFirstRightsConflicts(
      WHERE project_id = $1
        AND is_folder = false
        AND metadata->>'submissionStatus' = 'earmarked'
+     ORDER BY title, id
      LIMIT 25`,
     [projectId]
   );
@@ -170,6 +171,7 @@ export async function detectFirstRightsConflicts(
              AND position($3 in ${SQL_NORMALIZE.replace('%COL%', 'cd.content')}) > 0
            )
          )
+       ORDER BY cd.title, cd.id
        LIMIT 3`,
       [userId, normalizeForMatch(essayTitle), snippet]
     );

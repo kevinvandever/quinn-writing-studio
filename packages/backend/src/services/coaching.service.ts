@@ -73,16 +73,146 @@ interface MessageRow {
   created_at: Date;
 }
 
+// ─── Session Lifecycle ───────────────────────────────────────────────────────
+
+/**
+ * A sitting ends after this long without a message. The session is then
+ * closed and summarized, so Session Memory reflects it. Before this existed, a
+ * session only ended when the writer clicked End Session; otherwise it stayed
+ * open for days, was never summarized, and Quinn never remembered it.
+ */
+export const SESSION_IDLE_HOURS = 4;
+
+/** Thrown when a message is sent to a session that has already ended. */
+export class SessionEndedError extends Error {
+  constructor() {
+    super('This session has ended.');
+    this.name = 'SessionEndedError';
+  }
+}
+
+export type CurrentSession =
+  | { resumed: true; session: SessionRow; messages: MessageRow[] }
+  | { resumed: false; session: SessionContext };
+
+/**
+ * Resume the project's open session if it's still active, otherwise start a
+ * new one. An open session that has gone idle is closed first (summarized, or
+ * deleted if the writer never spoke in it), so a new sitting always starts with
+ * the previous one in Session Memory.
+ */
+export async function getOrStartCurrentSession(
+  userId: string,
+  projectId: string,
+  sessionType: SessionType,
+  options: { skipOpener?: boolean } = {}
+): Promise<CurrentSession> {
+  const openResult = await query<SessionRow & { last_activity: Date; user_messages: number }>(
+    `SELECT s.id, s.project_id, s.session_type, s.summary, s.next_steps, s.started_at, s.ended_at,
+            COALESCE(MAX(m.created_at), s.started_at) AS last_activity,
+            (COUNT(m.id) FILTER (WHERE m.role = 'user'))::int AS user_messages
+     FROM sessions s
+     LEFT JOIN messages m ON m.session_id = s.id
+     WHERE s.project_id = $1 AND s.ended_at IS NULL
+     GROUP BY s.id
+     ORDER BY s.started_at DESC
+     LIMIT 1`,
+    [projectId]
+  );
+
+  const latest = openResult.rows[0];
+  if (latest) {
+    const idleMs = Date.now() - new Date(latest.last_activity).getTime();
+    if (idleMs < SESSION_IDLE_HOURS * 60 * 60 * 1000) {
+      const messages = await query<MessageRow>(
+        `SELECT id, session_id, role, content, model_used, model_reason, token_count_input, token_count_output, created_at
+         FROM messages
+         WHERE session_id = $1
+         ORDER BY created_at ASC`,
+        [latest.id]
+      );
+      const { last_activity: _lastActivity, user_messages: _userMessages, ...session } = latest;
+      return { resumed: true, session, messages: messages.rows };
+    }
+    await closeSession(userId, latest.id, latest.user_messages);
+  }
+
+  const context = await startSession(userId, projectId, sessionType, options);
+  return { resumed: false, session: context };
+}
+
+/**
+ * Close every open session that has had no message for `idleHours`. Run hourly
+ * by the job scheduler. Returns how many were ended and how many removed.
+ */
+export async function closeIdleSessions(
+  idleHours = SESSION_IDLE_HOURS
+): Promise<{ ended: number; removed: number }> {
+  const idle = await query<{ id: string; user_id: string; user_messages: number }>(
+    `SELECT s.id, p.user_id,
+            (COUNT(m.id) FILTER (WHERE m.role = 'user'))::int AS user_messages
+     FROM sessions s
+     JOIN projects p ON p.id = s.project_id
+     LEFT JOIN messages m ON m.session_id = s.id
+     WHERE s.ended_at IS NULL
+     GROUP BY s.id, p.user_id
+     HAVING COALESCE(MAX(m.created_at), s.started_at) < NOW() - make_interval(hours => $1)
+     ORDER BY s.started_at ASC`,
+    [idleHours]
+  );
+
+  let ended = 0;
+  let removed = 0;
+  for (const row of idle.rows) {
+    try {
+      const outcome = await closeSession(row.user_id, row.id, row.user_messages);
+      if (outcome === 'ended') ended++;
+      if (outcome === 'removed') removed++;
+    } catch (err) {
+      // One failure (e.g. the API is down for the summary) shouldn't block the rest;
+      // the session stays open and the next run tries again.
+      console.warn(
+        `[Sessions] Failed to close idle session ${row.id}:`,
+        err instanceof Error ? err.message : err
+      );
+    }
+  }
+  return { ended, removed };
+}
+
+/**
+ * End a session with a summary, or delete it if the writer never sent a
+ * message (only Quinn's greeting, or nothing). An empty session would
+ * otherwise take a Session Memory slot and reset the "days since your last
+ * session" count without the writer having done anything.
+ */
+async function closeSession(
+  userId: string,
+  sessionId: string,
+  userMessages: number
+): Promise<'ended' | 'removed'> {
+  if (userMessages === 0) {
+    await query(`DELETE FROM sessions WHERE id = $1 AND ended_at IS NULL`, [sessionId]);
+    return 'removed';
+  }
+  await endSession(userId, sessionId);
+  return 'ended';
+}
+
 // ─── Start Session ───────────────────────────────────────────────────────────
 
 /**
  * Start a new coaching session for a project.
  * Creates the session in DB, loads project context, checks stale corpus and inactivity gap.
+ *
+ * `skipOpener` suppresses Quinn's greeting, for when the writer already has a
+ * message on the way (the previous session closed while the page was open).
  */
 export async function startSession(
   userId: string,
   projectId: string,
-  sessionType: SessionType
+  sessionType: SessionType,
+  options: { skipOpener?: boolean } = {}
 ): Promise<SessionContext> {
   // Verify project ownership
   const projectResult = await query<{
@@ -121,7 +251,7 @@ export async function startSession(
   // Check inactivity gap
   const inactivityDays = await checkInactivityGap(projectId);
 
-  // Load last 3 session summaries
+  // Load recent session summaries
   const sessionSummaries = await loadSessionSummaries(projectId);
 
   // Log activity event
@@ -139,7 +269,7 @@ export async function startSession(
   // Generate a proactive opening message from Quinn (coaching sessions only).
   // She greets the writer with what she noticed changed and where they left off.
   let openingMessage: string | null = null;
-  if (sessionType === 'coaching') {
+  if (sessionType === 'coaching' && !options.skipOpener) {
     openingMessage = await generateSessionOpener(
       userId,
       session.id,
@@ -301,7 +431,7 @@ export async function sendSessionMessage(
   }
 
   if (session.ended_at) {
-    throw new Error('Session has already ended');
+    throw new SessionEndedError();
   }
 
   // Verify project ownership
@@ -362,8 +492,7 @@ export async function sendSessionMessage(
     commandPreferOpus = outcome.preferOpus;
   }
 
-  // Load conversation history for this session (windowed to last 20 messages
-  // to prevent context overflow in long sessions)
+  // Load conversation history for this session
   const messagesResult = await query<MessageRow>(
     `SELECT id, session_id, role, content, model_used, model_reason, token_count_input, token_count_output, created_at
      FROM messages
@@ -391,32 +520,43 @@ export async function sendSessionMessage(
     convoPairs.push({ role: 'user', content: claudeDirective });
   }
 
-  // Keep the last 20 messages (10 exchanges) for context.
-  // If we're windowing, prepend a brief note so Quinn knows there's prior history.
-  const WINDOW_SIZE = 20;
-  let conversationMessages: ClaudeMessage[];
-  if (convoPairs.length > WINDOW_SIZE) {
-    const windowed = convoPairs.slice(-WINDOW_SIZE);
+  // Send as much of this session as fits a character budget, newest first.
+  // A sitting usually fits whole. When it doesn't, the system prompt says
+  // plainly that earlier messages are missing, so Quinn asks instead of
+  // pretending to remember. (This replaces a 20-message window that told her
+  // she had the dropped messages "in memory", which she didn't.)
+  const HISTORY_CHAR_BUDGET = 120_000; // roughly 40k tokens
+  const MIN_RECENT_MESSAGES = 6; // always keep the latest exchanges, even if long
+  let keptCount = 0;
+  let keptChars = 0;
+  for (let i = convoPairs.length - 1; i >= 0; i--) {
+    const length = convoPairs[i]!.content.length;
+    if (keptCount >= MIN_RECENT_MESSAGES && keptChars + length > HISTORY_CHAR_BUDGET) break;
+    keptChars += length;
+    keptCount++;
+  }
+  let conversationMessages: ClaudeMessage[] = convoPairs.slice(convoPairs.length - keptCount);
+  const omittedCount = convoPairs.length - conversationMessages.length;
+  const conversationNote =
+    omittedCount > 0
+      ? `This session is long, so its first ${omittedCount} message${omittedCount === 1 ? '' : 's'} aren't included below. You don't have their text, so don't claim to remember them. If the writer refers to something from earlier in the session that you can't see, ask them to remind you.`
+      : null;
+
+  // The API requires the conversation to begin with a user turn, but a session
+  // usually opens with Quinn's greeting, and the writer's first message is often
+  // a reply to it. Keep the greeting behind a short placeholder turn instead of
+  // dropping it, so Quinn knows what she asked.
+  if (conversationMessages[0]?.role === 'assistant') {
     conversationMessages = [
       {
-        role: 'user' as const,
-        content: `[Note: This session has ${convoPairs.length} messages total. Showing the most recent ${WINDOW_SIZE} for context. Refer to Session Memory above for earlier topics.]`,
+        role: 'user',
+        content:
+          omittedCount > 0
+            ? '(Earlier messages in this session are omitted.)'
+            : '(The writer opened a coaching session.)',
       },
-      {
-        role: 'assistant' as const,
-        content: `[Understood — I have our earlier conversation in memory via the session history.]`,
-      },
-      ...windowed,
+      ...conversationMessages,
     ];
-  } else {
-    conversationMessages = convoPairs;
-  }
-
-  // The Anthropic API requires the conversation to begin with a user turn.
-  // A session may open with Quinn's proactive greeting (an assistant message),
-  // so drop any leading assistant turns.
-  while (conversationMessages.length > 0 && conversationMessages[0]!.role === 'assistant') {
-    conversationMessages.shift();
   }
 
   // Load persona config
@@ -581,6 +721,7 @@ export async function sendSessionMessage(
     workflowContext,
     commandContext,
     sessionHistories: sessionSummaries,
+    conversationNote,
     corpusContext,
     activityContext: combinedActivityContext,
     taskInstructions: getTaskInstructions(taskType),
@@ -666,10 +807,6 @@ export async function endSession(
     throw new Error('Session not found');
   }
 
-  if (session.ended_at) {
-    throw new Error('Session has already ended');
-  }
-
   // Verify project ownership
   const projectResult = await query<{ id: string; user_id: string }>(
     `SELECT id, user_id FROM projects WHERE id = $1 AND user_id = $2`,
@@ -678,6 +815,12 @@ export async function endSession(
 
   if (projectResult.rows.length === 0) {
     throw new Error('Project not found or access denied');
+  }
+
+  // Already ended (by the idle closer, or another tab): return what was saved
+  // rather than failing, so End Session is safe to click at any time.
+  if (session.ended_at) {
+    return { summary: session.summary ?? '', nextSteps: session.next_steps ?? '' };
   }
 
   // Load all messages for this session
@@ -941,8 +1084,12 @@ async function checkInactivityGap(projectId: string): Promise<number | null> {
 }
 
 /**
- * Load summaries of the last 3 sessions for a project.
+ * Load summaries of the most recent ended sessions for a project.
+ * Sessions now close after each sitting, so this covers the last several
+ * sittings rather than a few long-lived sessions.
  */
+const SESSION_MEMORY_COUNT = 5;
+
 async function loadSessionSummaries(projectId: string): Promise<SessionSummary[]> {
   const result = await query<{
     summary: string | null;
@@ -953,8 +1100,8 @@ async function loadSessionSummaries(projectId: string): Promise<SessionSummary[]
      FROM sessions
      WHERE project_id = $1 AND ended_at IS NOT NULL
      ORDER BY started_at DESC
-     LIMIT 3`,
-    [projectId]
+     LIMIT $2`,
+    [projectId, SESSION_MEMORY_COUNT]
   );
 
   return result.rows.map((row) => ({

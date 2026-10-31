@@ -515,6 +515,8 @@ export interface AssemblePromptOptions {
   workflowContext: string | null;
   commandContext: string | null;
   sessionHistories: SessionSummary[];
+  /** Set when early messages of the current session were left out of the request. */
+  conversationNote?: string | null;
   corpusContext: string[];
   activityContext: string | null;
   taskInstructions: string;
@@ -536,13 +538,14 @@ function truncateToFit(text: string, budget: number): string {
  * Includes:
  * - Persona configuration (identity, voice, principles, expertise, ethics)
  * - Project context (name, central question, description)
- * - Session history summaries (last 3 sessions)
- * - Relevant corpus context (truncated to token budget)
+ * - Session history summaries (recent ended sessions)
+ * - A note when early messages of this session were left out
+ * - Relevant corpus context (truncated to the character budget)
  * - Activity context
  * - Task-specific instructions
  * - Ethics enforcement
  *
- * Configurable token budget: 8k for Sonnet, 16k for Opus
+ * Character budget per model: see TOKEN_BUDGET.
  */
 export function assembleSystemPrompt(options: AssemblePromptOptions): string {
   const {
@@ -553,6 +556,7 @@ export function assembleSystemPrompt(options: AssemblePromptOptions): string {
     workflowContext,
     commandContext,
     sessionHistories,
+    conversationNote,
     corpusContext,
     activityContext,
     taskInstructions,
@@ -593,10 +597,15 @@ export function assembleSystemPrompt(options: AssemblePromptOptions): string {
     );
   }
 
-  // 4. Session history summaries (last 3)
+  // 4. Session history summaries (recent ended sessions)
   if (sessionHistories.length > 0) {
     const historySection = buildSessionHistorySection(sessionHistories);
     sections.push(historySection);
+  }
+
+  // 4b. Honest note when this session's early messages aren't in the request
+  if (conversationNote) {
+    sections.push(`## Earlier in This Session\n${conversationNote}`);
   }
 
   // 5. Activity context
@@ -766,10 +775,10 @@ function buildProjectSection(project: ProjectContext): string {
 function buildSessionHistorySection(sessions: SessionSummary[]): string {
   const lines: string[] = ['## Session Memory'];
   lines.push(
-    'These are your memories of previous sessions with this writer. You remember these conversations. When starting a new session, naturally acknowledge where you left off — reference specific topics, decisions, or unresolved threads. Do not recite the summaries verbatim; weave them into conversation as a coach who remembers would.'
+    "These are your notes from previous sessions with this writer, most recent first. They're what you remember: you have these notes, not the full conversations, so if the writer asks about a detail that isn't here, say you don't have it rather than guessing. When starting a new session, naturally acknowledge where you left off — reference specific topics, decisions, or unresolved threads. Do not recite the summaries verbatim; weave them into conversation as a coach who remembers would."
   );
 
-  for (const session of sessions.slice(0, 3)) {
+  for (const session of sessions) {
     const date = formatWriterDate(session.startedAt);
     lines.push(`\n### Session — ${date}`);
     if (session.summary) {

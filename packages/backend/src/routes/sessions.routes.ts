@@ -9,6 +9,8 @@ import {
   startSession,
   sendSessionMessage,
   endSession,
+  getOrStartCurrentSession,
+  SessionEndedError,
   type SessionType,
 } from '../services/coaching.service.js';
 
@@ -16,8 +18,16 @@ const router = Router();
 
 // ─── Schemas ─────────────────────────────────────────────────────────────────
 
+const sessionTypeSchema = z.enum(['coaching', 'editorial_review', 'theme_analysis', 'promptly_coaching']);
+
 const startSessionSchema = z.object({
-  session_type: z.enum(['coaching', 'editorial_review', 'theme_analysis', 'promptly_coaching']),
+  session_type: sessionTypeSchema,
+});
+
+const currentSessionSchema = z.object({
+  session_type: sessionTypeSchema.default('coaching'),
+  /** Skip Quinn's greeting: the writer already has a message on the way. */
+  skip_opener: z.boolean().default(false),
 });
 
 const sendMessageSchema = z.object({
@@ -45,6 +55,40 @@ router.post(
     );
 
     res.status(201).json({ session: sessionContext });
+  })
+);
+
+/**
+ * POST /api/projects/:id/sessions/current
+ * Resume the project's open session if it's still active; otherwise close it
+ * (if idle) and start a new one. Responds with either
+ *   { resumed: true, session, messages }   (200)
+ *   { resumed: false, session: SessionContext }   (201)
+ */
+router.post(
+  '/projects/:id/sessions/current',
+  requireAuth,
+  asyncHandler(async (req: Request, res: Response) => {
+    const userId = req.user!.userId;
+    const projectId = req.params.id as string;
+    const data = currentSessionSchema.parse(req.body ?? {});
+
+    const projectResult = await query(
+      `SELECT id FROM projects WHERE id = $1 AND user_id = $2 AND archived_at IS NULL`,
+      [projectId, userId]
+    );
+    if (projectResult.rows.length === 0) {
+      throw new AppError(404, ErrorCodes.NOT_FOUND, 'Project not found');
+    }
+
+    const current = await getOrStartCurrentSession(
+      userId,
+      projectId,
+      data.session_type as SessionType,
+      { skipOpener: data.skip_opener }
+    );
+
+    res.status(current.resumed ? 200 : 201).json(current);
   })
 );
 
@@ -194,7 +238,16 @@ router.post(
       throw new AppError(404, ErrorCodes.NOT_FOUND, 'Session not found');
     }
 
-    await sendSessionMessage(userId, sessionId, data.content, res);
+    try {
+      await sendSessionMessage(userId, sessionId, data.content, res);
+    } catch (err) {
+      // The session was closed (idle, or ended in another tab). The client
+      // starts a new session and re-sends the message.
+      if (err instanceof SessionEndedError) {
+        throw new AppError(409, ErrorCodes.CONFLICT, err.message);
+      }
+      throw err;
+    }
   })
 );
 

@@ -17,6 +17,14 @@ export interface RetryingEvent {
   delayMs: number;
 }
 
+/** The server answered with an HTTP error before streaming began. */
+export class SSEHttpError extends Error {
+  constructor(public status: number, message: string) {
+    super(message);
+    this.name = 'SSEHttpError';
+  }
+}
+
 export interface SSEStreamOptions {
   /** Request body to send with the POST request */
   body?: unknown;
@@ -91,10 +99,9 @@ export function createSSEStream(
     .then(async (response) => {
       if (!response.ok) {
         const errorText = await response.text();
-        const error = new Error(
-          `SSE request failed: ${response.status} ${errorText}`
+        errorCallback?.(
+          new SSEHttpError(response.status, `SSE request failed: ${response.status} ${errorText}`)
         );
-        errorCallback?.(error);
         return;
       }
 

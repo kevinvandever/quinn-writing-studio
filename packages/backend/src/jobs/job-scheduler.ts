@@ -7,6 +7,7 @@ import { runAiNewsScanner } from './ai-news-scanner.job.js';
 import { runPublishingScanner } from './publishing-scanner.job.js';
 import { runWritingJobsScanner } from './writing-jobs-scanner.job.js';
 import { runNudgeChecker } from './nudge-checker.job.js';
+import { runSessionCloser } from './session-closer.job.js';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -97,6 +98,10 @@ function getQueue(): Bull.Queue<JobPayload> {
       await runNudgeChecker(job.data.userId);
     });
 
+    intelligenceQueue.process('session-close', async () => {
+      await runSessionCloser();
+    });
+
     // Error handling
     intelligenceQueue.on('failed', (job, err) => {
       console.error(`[JobScheduler] Job ${job.name} failed:`, err.message);
@@ -173,6 +178,16 @@ export async function startScheduler(): Promise<void> {
     });
     cronJobs.push(task);
     console.log(`[JobScheduler] Nudge checker scheduled: ${nudgeSchedule}`);
+  }
+
+  // Close idle coaching sessions (hourly, offset from the nudge check)
+  const sessionCloseSchedule = '30 * * * *';
+  if (cron.validate(sessionCloseSchedule)) {
+    const task = cron.schedule(sessionCloseSchedule, async () => {
+      await queue.add('session-close', { userId, jobType: 'session-close' });
+    });
+    cronJobs.push(task);
+    console.log(`[JobScheduler] Session closer scheduled: ${sessionCloseSchedule}`);
   }
 
   console.log('[JobScheduler] All intelligence jobs scheduled');

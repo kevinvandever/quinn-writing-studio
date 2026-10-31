@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { useParams } from 'react-router-dom';
-import { get, post } from '../../services/api-client';
-import { createSSEStream, type ModelInfo, type DoneEvent } from '../../services/sse-client';
+import { post } from '../../services/api-client';
+import { createSSEStream, SSEHttpError, type ModelInfo, type DoneEvent } from '../../services/sse-client';
 import { MessageBubble } from './MessageBubble';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
@@ -13,6 +13,8 @@ interface Message {
   model_used: string | null;
   model_reason: string | null;
   created_at: string;
+  /** Client-only marker shown where one session ended and the next began. */
+  divider?: boolean;
 }
 
 interface Session {
@@ -37,6 +39,38 @@ interface SessionContext {
   staleCorpus: boolean;
   inactivityDays: number | null;
   openingMessage: string | null;
+}
+
+/** Response of POST /api/projects/:id/sessions/current */
+type CurrentSessionResponse =
+  | { resumed: true; session: Session; messages: Message[] }
+  | { resumed: false; session: SessionContext };
+
+/** Turn a freshly started session's context into the Session shape the UI tracks. */
+function sessionFromContext(ctx: SessionContext): Session {
+  return {
+    id: ctx.sessionId,
+    project_id: ctx.projectId,
+    session_type: ctx.sessionType,
+    summary: null,
+    next_steps: null,
+    started_at: new Date().toISOString(),
+    ended_at: null,
+  };
+}
+
+function openerMessages(ctx: SessionContext): Message[] {
+  if (!ctx.openingMessage) return [];
+  return [
+    {
+      id: `opener-${Date.now()}`,
+      role: 'assistant',
+      content: ctx.openingMessage,
+      model_used: null,
+      model_reason: null,
+      created_at: new Date().toISOString(),
+    },
+  ];
 }
 
 // ─── Component ───────────────────────────────────────────────────────────────
@@ -76,52 +110,21 @@ export function CoachingWorkspace() {
       setError(null);
 
       try {
-        // Try to find an active session for this project
-        const response = await get<{
-          sessions: Session[];
-          pagination: { total: number };
-        }>(`/api/projects/${projectId}/sessions?limit=1`);
+        // The server resumes the open session if it's still active, or closes
+        // an idle one (saving Quinn's notes) and starts fresh.
+        const current = await post<CurrentSessionResponse>(
+          `/api/projects/${projectId}/sessions/current`,
+          { session_type: 'coaching' }
+        );
 
-        const activeSession = response.sessions.find((s) => !s.ended_at);
-
-        if (activeSession) {
-          // Resume existing session
-          const sessionData = await get<{ session: Session; messages: Message[] }>(
-            `/api/sessions/${activeSession.id}`
-          );
-          setSession(sessionData.session);
-          setMessages(sessionData.messages);
+        if (current.resumed) {
+          setSession(current.session);
+          setMessages(current.messages);
         } else {
-          // Start a new session
-          const newSession = await post<{ session: SessionContext }>(
-            `/api/projects/${projectId}/sessions`,
-            { session_type: 'coaching' }
-          );
-          setSessionContext(newSession.session);
-          setSession({
-            id: newSession.session.sessionId,
-            project_id: newSession.session.projectId,
-            session_type: newSession.session.sessionType,
-            summary: null,
-            next_steps: null,
-            started_at: new Date().toISOString(),
-            ended_at: null,
-          });
+          setSessionContext(current.session);
+          setSession(sessionFromContext(current.session));
           // If Quinn generated a proactive opening message, show it
-          if (newSession.session.openingMessage) {
-            setMessages([
-              {
-                id: `opener-${Date.now()}`,
-                role: 'assistant',
-                content: newSession.session.openingMessage,
-                model_used: null,
-                model_reason: null,
-                created_at: new Date().toISOString(),
-              },
-            ]);
-          } else {
-            setMessages([]);
-          }
+          setMessages(openerMessages(current.session));
         }
       } catch (err) {
         const message = err instanceof Error ? err.message : 'Failed to initialize session';
@@ -134,6 +137,119 @@ export function CoachingWorkspace() {
     initSession();
   }, [projectId]);
 
+  /**
+   * Show the writer's message and stream Quinn's reply from the given session.
+   * If the server says that session has ended (closed after going idle while
+   * this page stayed open), start a new session and send the message there.
+   */
+  const streamMessage = useCallback(
+    (targetSession: Session, content: string, isRetry = false) => {
+      setIsStreaming(true);
+      setStreamingContent('');
+      setModelInfo(null);
+      setError(null);
+
+      // Add user message to the list immediately
+      const tempId = `temp-${Date.now()}`;
+      const userMessage: Message = {
+        id: tempId,
+        role: 'user',
+        content,
+        model_used: null,
+        model_reason: null,
+        created_at: new Date().toISOString(),
+      };
+      setMessages((prev) => [...prev, userMessage]);
+
+      // Stream the response
+      const stream = createSSEStream(`/api/sessions/${targetSession.id}/messages`, {
+        body: { content },
+        method: 'POST',
+      });
+
+      let fullContent = '';
+      let streamedModel: ModelInfo | null = null;
+
+      stream
+        .onToken((token) => {
+          fullContent += token;
+          setStreamingContent(fullContent);
+        })
+        .onModelInfo((info) => {
+          streamedModel = info;
+          setModelInfo(info);
+        })
+        .onRetrying((event) => {
+          setStreamingContent(`Quinn is in high demand right now — trying again (attempt ${event.attempt})...`);
+        })
+        .onDone((_event: DoneEvent) => {
+          // Add the complete assistant message
+          const assistantMessage: Message = {
+            id: `temp-${Date.now()}-assistant`,
+            role: 'assistant',
+            content: fullContent,
+            model_used: streamedModel?.model || null,
+            model_reason: streamedModel?.reason || null,
+            created_at: new Date().toISOString(),
+          };
+          setMessages((prev) => [...prev, assistantMessage]);
+          setStreamingContent('');
+          setIsStreaming(false);
+          setModelInfo(null);
+        })
+        .onError((err) => {
+          if (err instanceof SSEHttpError && err.status === 409 && !isRetry && projectId) {
+            void rollOverAndResend(targetSession, tempId, content);
+            return;
+          }
+          setError(err.message);
+          setIsStreaming(false);
+          setStreamingContent('');
+        });
+
+      abortRef.current = () => stream.abort();
+    },
+    // rollOverAndResend (below) only uses state setters and projectId, so a
+    // stale copy of it behaves the same as a fresh one.
+    [projectId]
+  );
+
+  /**
+   * The previous session closed while the page was open. Start a new one
+   * (without Quinn's greeting, since the writer is mid-thought), mark the break
+   * in the transcript, and send the message again.
+   */
+  async function rollOverAndResend(previous: Session, tempId: string, content: string) {
+    try {
+      const current = await post<CurrentSessionResponse>(
+        `/api/projects/${projectId}/sessions/current`,
+        { session_type: previous.session_type, skip_opener: true }
+      );
+      const next = current.resumed ? current.session : sessionFromContext(current.session);
+      const divider: Message = {
+        id: `divider-${Date.now()}`,
+        role: 'system',
+        content: 'Earlier session ended · Quinn saved her notes from it',
+        model_used: null,
+        model_reason: null,
+        created_at: new Date().toISOString(),
+        divider: true,
+      };
+      setMessages((prev) => [
+        ...prev.filter((m) => m.id !== tempId),
+        divider,
+        ...(current.resumed ? current.messages : []),
+      ]);
+      if (!current.resumed) setSessionContext(current.session);
+      setSession(next);
+      streamMessage(next, content, true);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to start a new session');
+      setIsStreaming(false);
+      setStreamingContent('');
+    }
+  }
+
   // Send message handler. Pass overrideContent to send a command (e.g. /help)
   // without going through the input box.
   const handleSendMessage = useCallback(async (overrideContent?: string) => {
@@ -141,63 +257,8 @@ export function CoachingWorkspace() {
     if (!session || !content || isStreaming) return;
 
     if (overrideContent === undefined) setInputValue('');
-    setIsStreaming(true);
-    setStreamingContent('');
-    setModelInfo(null);
-
-    // Add user message to the list immediately
-    const userMessage: Message = {
-      id: `temp-${Date.now()}`,
-      role: 'user',
-      content,
-      model_used: null,
-      model_reason: null,
-      created_at: new Date().toISOString(),
-    };
-    setMessages((prev) => [...prev, userMessage]);
-
-    // Stream the response
-    const stream = createSSEStream(`/api/sessions/${session.id}/messages`, {
-      body: { content },
-      method: 'POST',
-    });
-
-    let fullContent = '';
-
-    stream
-      .onToken((token) => {
-        fullContent += token;
-        setStreamingContent(fullContent);
-      })
-      .onModelInfo((info) => {
-        setModelInfo(info);
-      })
-      .onRetrying((event) => {
-        setStreamingContent(`Quinn is in high demand right now — trying again (attempt ${event.attempt})...`);
-      })
-      .onDone((_event: DoneEvent) => {
-        // Add the complete assistant message
-        const assistantMessage: Message = {
-          id: `temp-${Date.now()}-assistant`,
-          role: 'assistant',
-          content: fullContent,
-          model_used: modelInfo?.model || null,
-          model_reason: modelInfo?.reason || null,
-          created_at: new Date().toISOString(),
-        };
-        setMessages((prev) => [...prev, assistantMessage]);
-        setStreamingContent('');
-        setIsStreaming(false);
-        setModelInfo(null);
-      })
-      .onError((err) => {
-        setError(err.message);
-        setIsStreaming(false);
-        setStreamingContent('');
-      });
-
-    abortRef.current = () => stream.abort();
-  }, [session, inputValue, isStreaming, modelInfo]);
+    streamMessage(session, content);
+  }, [session, inputValue, isStreaming, streamMessage]);
 
   // Handle keyboard shortcuts
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -338,10 +399,18 @@ export function CoachingWorkspace() {
         )}
 
         {messages
-          .filter((m) => m.role !== 'system')
-          .map((message) => (
-            <MessageBubble key={message.id} message={message} />
-          ))}
+          .filter((m) => m.role !== 'system' || m.divider)
+          .map((message) =>
+            message.divider ? (
+              <div key={message.id} className="flex items-center gap-3 py-1" role="separator">
+                <div className="flex-1 border-t border-warm-300" />
+                <span className="text-xs text-warm-500">{message.content}</span>
+                <div className="flex-1 border-t border-warm-300" />
+              </div>
+            ) : (
+              <MessageBubble key={message.id} message={message} />
+            )
+          )}
 
         {/* Streaming response */}
         {isStreaming && streamingContent && (

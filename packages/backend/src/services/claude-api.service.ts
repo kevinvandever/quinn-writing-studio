@@ -551,6 +551,8 @@ export interface AssemblePromptOptions {
   corpusOverview: string[];
   manuscriptMap: string | null;
   firstRightsContext: string | null;
+  /** Quinn's Notebook section: her long-term notes on this project. */
+  notebook: string | null;
   sessionHistories: SessionSummary[];
   /** Other context that holds for the whole session (e.g. the Promptly story being worked on). */
   sessionContext: string | null;
@@ -587,7 +589,8 @@ function truncateToFit(text: string, budget: number): string {
  *   manuscript, and (for whole-corpus modes) everything outside it. This is
  *   the large part and only changes after a Scrivener sync.
  * Block 2 (cached): binder map with loglines, first-publication rights,
- *   Session Memory, session context. Changes when summaries or sessions do.
+ *   Quinn's Notebook, Session Memory, session context. Changes when
+ *   summaries, the notebook, or sessions do.
  * Turn context (not cached): date and time, activity, workflow step or
  *   command, and retrieved material for this message. It goes in the user
  *   turn, so it can change every turn without invalidating the cached prefix
@@ -617,6 +620,8 @@ export function assemblePrompt(options: AssemblePromptOptions): AssembledPrompt 
   // First-publication rights — pieces reserved for journal submission, and any
   // apparent Substack collisions.
   if (options.firstRightsContext) session.push(options.firstRightsContext);
+  // The notebook changes only when a session ends, so it's cached with the map.
+  if (options.notebook) session.push(options.notebook);
   if (options.sessionHistories.length > 0) {
     session.push(buildSessionHistorySection(options.sessionHistories));
   }

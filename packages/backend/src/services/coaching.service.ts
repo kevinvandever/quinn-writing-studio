@@ -18,6 +18,17 @@ import {
   type TaskType,
 } from './claude-api.service.js';
 import { loadManuscriptContext } from './manuscript-context.service.js';
+import {
+  loadNotebook,
+  loadPieceIndex,
+  renderNotebookForPrompt,
+  renderNotebookForWriter,
+  forgetNotebookEntries,
+  updateNotebook,
+  hasEndedSessions,
+  openThreads,
+  type Notebook,
+} from './notebook.service.js';
 import { formatWriterDate } from '../utils/time.js';
 import { getEthicsPrompt, checkEthicsViolation, logEthicsBoundary } from './ethics.service.js';
 import { logApiUsage } from './usage-tracking.service.js';
@@ -340,6 +351,10 @@ async function generateSessionOpener(
     if (last.summary) contextParts.push(`Last session: ${last.summary}`);
     if (last.nextSteps) contextParts.push(`What was next: ${last.nextSteps}`);
   }
+  const threads = openThreads(await loadNotebook(projectId));
+  if (threads.length > 0) {
+    contextParts.push(`Open threads in your notebook:\n${threads.map((t) => `- ${t}`).join('\n')}`);
+  }
   if (inactivityDays !== null && inactivityDays > 0) {
     contextParts.push(`It has been ${inactivityDays} day${inactivityDays > 1 ? 's' : ''} since the last session.`);
   }
@@ -586,6 +601,11 @@ export async function sendSessionMessage(
   // Load session summaries for context
   const sessionSummaries = await loadSessionSummaries(session.project_id);
 
+  // Quinn's notebook: her long-term notes on this project (decisions, notes on
+  // pieces, patterns, open threads), revised after each session ends.
+  const notebook = await loadNotebook(session.project_id);
+  const notebookContext = renderNotebookForPrompt(notebook, await pieceIndexFor(notebook, session.project_id));
+
   // The whole manuscript goes into the cached part of the prompt, so Quinn has
   // read every piece in full on every turn. Whole-corpus modes (/analyze, essay
   // triage) also get everything outside the book (salvage, notes, research).
@@ -743,6 +763,7 @@ export async function sendSessionMessage(
     corpusOverview: corpusOverview.entries,
     manuscriptMap,
     firstRightsContext,
+    notebook: notebookContext,
     sessionHistories: sessionSummaries,
     sessionContext: promptlyContext || null,
     activityContext,
@@ -987,7 +1008,16 @@ Format your response as JSON: {"summary": "...", "next_steps": "..."}`,
     [userId, session.project_id, JSON.stringify({ session_id: sessionId })]
   );
 
+  // Fold this session into Quinn's notebook in the background. If it fails,
+  // the hourly session closer retries.
+  void updateNotebook(session.project_id, userId);
+
   return { summary, nextSteps };
+}
+
+/** The piece index, loaded only when the notebook has notes on pieces to place. */
+async function pieceIndexFor(notebook: Notebook | null, projectId: string) {
+  return notebook?.entries.some((e) => e.kind === 'piece') ? loadPieceIndex(projectId) : null;
 }
 
 // ─── Helper Functions ────────────────────────────────────────────────────────
@@ -1793,6 +1823,10 @@ function buildHelpMenu(projectType: string | null, state: WorkflowState | null):
   lines.push('  /unearmark [piece]  —  Release a reserved piece');
   lines.push('  /earmarked          —  List reserved pieces and any Substack conflicts');
   lines.push('');
+  lines.push("Quinn's notebook:");
+  lines.push('  /notebook           —  See what I keep between sessions');
+  lines.push('  /forget [number]    —  Remove a note from the notebook, e.g. /forget n3');
+  lines.push('');
   lines.push('Inside a workflow:  /next (advance)  ·  /back (previous step)  ·  /exit (leave)');
   lines.push('');
   if (state) {
@@ -1936,6 +1970,49 @@ async function handleSlashCommand(
           })`
         );
       }
+    }
+    return replyStatic(lines.join('\n'));
+  }
+
+  // ── Quinn's notebook: what she keeps between sessions ────────────────────
+  if (cmd === 'notebook' || cmd === 'notes') {
+    const notebook = await loadNotebook(projectId);
+    if (notebook && notebook.entries.length > 0) {
+      return replyStatic(renderNotebookForWriter(notebook, await pieceIndexFor(notebook, projectId)));
+    }
+    if (!notebook && (await hasEndedSessions(projectId))) {
+      void updateNotebook(projectId, userId); // start it from recent sessions
+      return replyStatic(
+        "I haven't started a notebook for this project yet. I'm reading back through our recent sessions to start one now, which takes a few minutes; try /notebook again after that. From then on I update it whenever a session ends."
+      );
+    }
+    return replyStatic(
+      'My notebook for this project is empty so far. When a session ends, I note the decisions you made, what you said about each piece, patterns I noticed, and threads to pick up next time.'
+    );
+  }
+
+  if (cmd === 'forget') {
+    const ids = restTokens
+      .flatMap((t) => t.split(','))
+      .map((t) => t.trim().toLowerCase().replace(/^#/, ''))
+      .filter(Boolean)
+      .map((t) => (/^\d+$/.test(t) ? `n${t}` : t));
+    if (ids.length === 0) {
+      return replyStatic(
+        'Tell me which note to remove by its number, e.g. /forget n3 (several at once: /forget n3 n7). /notebook lists them.'
+      );
+    }
+    const { removed, missing } = await forgetNotebookEntries(projectId, sessionId, ids);
+    const lines: string[] = [];
+    if (removed.length > 0) {
+      lines.push('Removed from my notebook:');
+      for (const e of removed) lines.push(`  ${e.id}  ${e.text}`);
+    }
+    if (missing.length > 0) {
+      if (lines.length > 0) lines.push('');
+      lines.push(
+        `There's no note ${missing.join(', ')} in the notebook. /notebook lists them with their numbers.`
+      );
     }
     return replyStatic(lines.join('\n'));
   }

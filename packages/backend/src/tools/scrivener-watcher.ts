@@ -32,7 +32,6 @@ import { join } from 'path';
 import { createHash } from 'crypto';
 import {
   parseScrivenerZip,
-  flattenDocuments,
   type ParsedSnapshot,
   type ScrivenerParseResult,
 } from '../services/scrivener-parser.service.js';
@@ -158,13 +157,21 @@ async function getToken(): Promise<string> {
 
 // ─── Sync Logic ──────────────────────────────────────────────────────────────
 
-function computeCorpusHash(documents: ReturnType<typeof flattenDocuments>): string {
-  const hashInput = documents
-    .filter((d) => !d.isFolder)
-    .map((d) => `${d.uuid}:${d.contentHash}`)
-    .sort()
-    .join('|');
-  return createHash('sha256').update(hashInput).digest('hex');
+/**
+ * Fingerprint of the binder: every item's text, title, folder, and position,
+ * so renaming, moving, or reordering pieces also triggers a sync (not just
+ * editing text).
+ */
+function computeCorpusHash(documents: ScrivenerParseResult['documents']): string {
+  const lines: string[] = [];
+  const walk = (docs: ScrivenerParseResult['documents'], parent: string): void => {
+    for (const d of docs) {
+      lines.push([d.uuid, d.contentHash, d.title, parent, d.sortOrder].join(':'));
+      walk(d.children, d.uuid);
+    }
+  };
+  walk(documents, '');
+  return createHash('sha256').update(lines.sort().join('|')).digest('hex');
 }
 
 async function syncCorpus(): Promise<void> {
@@ -180,8 +187,7 @@ async function syncCorpus(): Promise<void> {
   // Read and parse the ZIP
   const zipBuffer = readFileSync(backup.path);
   const parseResult = parseScrivenerZip(zipBuffer, backup.path);
-  const flatDocs = flattenDocuments(parseResult.documents);
-  const corpusHash = computeCorpusHash(flatDocs);
+  const corpusHash = computeCorpusHash(parseResult.documents);
 
   // Check if anything actually changed
   const state = loadState();

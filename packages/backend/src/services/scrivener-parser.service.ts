@@ -56,6 +56,23 @@ export interface DiffSummary {
   added: Array<{ title: string; uuid: string }>;
   modified: Array<{ title: string; uuid: string; oldWordCount: number; newWordCount: number }>;
   deleted: Array<{ title: string; uuid: string }>;
+  /** Documents and folders whose title changed. (Absent in imports before Nov 2026.) */
+  renamed?: Array<{ uuid: string; oldTitle: string; newTitle: string }>;
+  /** Documents and folders that moved to a different folder, with binder paths. */
+  moved?: Array<{ uuid: string; title: string; from: string; to: string }>;
+  /** Folders (or the binder's top level) whose items were put in a new order. */
+  reordered?: Array<{ uuid: string | null; title: string }>;
+}
+
+/** What the database knows about a document, for change detection. */
+export interface ExistingDocumentInfo {
+  source_id: string;
+  title: string;
+  content_hash: string;
+  word_count: number;
+  /** Scrivener UUID of the parent (null at the top level); omit if unknown. */
+  parent_source_id?: string | null;
+  sort_order?: number | null;
 }
 
 interface BinderItem {
@@ -330,11 +347,98 @@ function sumWordCounts(documents: ParsedDocument[]): number {
 }
 
 /**
- * Detect changes between a new parse result and existing stored documents.
+ * Detect changes between a new parse result and existing stored documents:
+ * text added, changed, or deleted, and, when the existing documents carry
+ * their binder position, renames, moves, and reordering.
  */
 export function detectChanges(
   newDocuments: ParsedDocument[],
-  existingDocuments: Array<{ source_id: string; title: string; content_hash: string; word_count: number }>
+  existingDocuments: ExistingDocumentInfo[]
+): DiffSummary {
+  const summary = detectContentChanges(newDocuments, existingDocuments);
+  if (existingDocuments.every((d) => d.parent_source_id !== undefined)) {
+    Object.assign(summary, detectStructureChanges(newDocuments, existingDocuments));
+  }
+  return summary;
+}
+
+/** Renames, moves between folders, and new orders within a folder. */
+function detectStructureChanges(
+  newDocuments: ParsedDocument[],
+  existingDocuments: ExistingDocumentInfo[]
+): Required<Pick<DiffSummary, 'renamed' | 'moved' | 'reordered'>> {
+  interface Place {
+    title: string;
+    parent: string | null;
+    order: number;
+  }
+  const now = new Map<string, Place>();
+  const walk = (docs: ParsedDocument[], parent: string | null): void => {
+    docs.forEach((d, i) => {
+      if (!now.has(d.uuid)) now.set(d.uuid, { title: d.title, parent, order: d.sortOrder ?? i });
+      walk(d.children, d.uuid);
+    });
+  };
+  walk(newDocuments, null);
+  const before = new Map<string, Place>();
+  for (const d of existingDocuments) {
+    if (!before.has(d.source_id)) {
+      before.set(d.source_id, { title: d.title, parent: d.parent_source_id ?? null, order: d.sort_order ?? 0 });
+    }
+  }
+  const pathOf = (places: Map<string, Place>, parent: string | null): string => {
+    const names: string[] = [];
+    for (let p = parent, guard = 0; p && guard < 50; guard++) {
+      const place = places.get(p);
+      if (!place) break;
+      names.unshift(place.title);
+      p = place.parent;
+    }
+    return names.length > 0 ? names.join(' › ') : 'the top level of the binder';
+  };
+
+  const renamed: DiffSummary['renamed'] = [];
+  const moved: DiffSummary['moved'] = [];
+  for (const [uuid, place] of now) {
+    const old = before.get(uuid);
+    if (!old) continue;
+    if (old.title !== place.title) renamed!.push({ uuid, oldTitle: old.title, newTitle: place.title });
+    if (old.parent !== place.parent) {
+      moved!.push({ uuid, title: place.title, from: pathOf(before, old.parent), to: pathOf(now, place.parent) });
+    }
+  }
+
+  // A folder is reordered when the items that stayed in it changed order.
+  // (Positions also shift when items are added or moved; that isn't a reorder.)
+  const childrenIn = (places: Map<string, Place>): Map<string | null, string[]> => {
+    const groups = new Map<string | null, Array<[string, number]>>();
+    for (const [uuid, place] of places) {
+      const list = groups.get(place.parent) ?? [];
+      list.push([uuid, place.order]);
+      groups.set(place.parent, list);
+    }
+    const ordered = new Map<string | null, string[]>();
+    for (const [parent, list] of groups) {
+      ordered.set(parent, list.sort((a, b) => a[1] - b[1] || a[0].localeCompare(b[0])).map(([u]) => u));
+    }
+    return ordered;
+  };
+  const oldChildren = childrenIn(before);
+  const reordered: DiffSummary['reordered'] = [];
+  for (const [parent, kids] of childrenIn(now)) {
+    const stayed = new Set(kids.filter((u) => before.get(u)?.parent === parent));
+    const oldOrder = (oldChildren.get(parent) ?? []).filter((u) => stayed.has(u));
+    const newOrder = kids.filter((u) => stayed.has(u));
+    if (oldOrder.join('|') !== newOrder.join('|')) {
+      reordered!.push({ uuid: parent, title: parent ? now.get(parent)?.title ?? 'a folder' : 'the top level of the binder' });
+    }
+  }
+  return { renamed, moved, reordered };
+}
+
+function detectContentChanges(
+  newDocuments: ParsedDocument[],
+  existingDocuments: ExistingDocumentInfo[]
 ): DiffSummary {
   const existingMap = new Map(
     existingDocuments.map((doc) => [doc.source_id, doc])

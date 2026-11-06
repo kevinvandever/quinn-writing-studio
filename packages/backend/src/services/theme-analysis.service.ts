@@ -124,10 +124,12 @@ export async function checkDocumentThemes(
 
   // Load existing documents (excluding the new one)
   const existingDocs = await query<DocumentSummary>(
-    `SELECT cd.id, cd.project_id, p.name as project_name, cd.title, cd.content, cd.word_count
+    `WITH RECURSIVE ${TRASH_CTE}
+     SELECT cd.id, cd.project_id, p.name as project_name, cd.title, cd.content, cd.word_count
      FROM corpus_documents cd
      JOIN projects p ON p.id = cd.project_id
      WHERE p.user_id = $1 AND cd.id != $2 AND cd.is_folder = false
+       AND cd.id NOT IN (SELECT id FROM trash)
      ORDER BY cd.word_count DESC
      LIMIT 20`,
     [userId, newDocumentId]
@@ -189,7 +191,8 @@ export async function getThemeMap(userId: string) {
     strength: number;
     discovered_at: Date;
   }>(
-    `SELECT tc.id, tc.document_a_id,
+    `WITH RECURSIVE ${TRASH_CTE}
+     SELECT tc.id, tc.document_a_id,
             da.title as document_a_title, pa.name as document_a_project,
             tc.document_b_id,
             db.title as document_b_title, pb.name as document_b_project,
@@ -200,6 +203,9 @@ export async function getThemeMap(userId: string) {
      JOIN corpus_documents db ON db.id = tc.document_b_id
      JOIN projects pb ON pb.id = db.project_id
      WHERE pa.user_id = $1
+       -- Connections stay stored; a piece taken back out of Trash shows them again.
+       AND tc.document_a_id NOT IN (SELECT id FROM trash)
+       AND tc.document_b_id NOT IN (SELECT id FROM trash)
      ORDER BY tc.strength DESC, tc.discovered_at DESC`,
     [userId]
   );
@@ -209,12 +215,29 @@ export async function getThemeMap(userId: string) {
 
 // ─── Internal Helpers ────────────────────────────────────────────────────────
 
+/**
+ * Everything in Scrivener's Trash, across the user's projects (the Trash
+ * folder and all beneath it). Deleted work shouldn't show up as a theme.
+ * Same rule as coaching's loadTrashDocumentIds.
+ */
+const TRASH_CTE = `trash AS (
+       SELECT cd.id
+       FROM corpus_documents cd
+       JOIN projects p ON p.id = cd.project_id
+       WHERE p.user_id = $1 AND cd.source_type = 'scrivener' AND cd.is_folder = true
+         AND (cd.metadata->>'scrivenerType' = 'TrashFolder' OR lower(cd.title) = 'trash')
+       UNION ALL
+       SELECT c.id FROM corpus_documents c JOIN trash t ON c.parent_id = t.id
+     )`;
+
 async function loadUserDocuments(userId: string): Promise<DocumentSummary[]> {
   const result = await query<DocumentSummary>(
-    `SELECT cd.id, cd.project_id, p.name as project_name, cd.title, cd.content, cd.word_count
+    `WITH RECURSIVE ${TRASH_CTE}
+     SELECT cd.id, cd.project_id, p.name as project_name, cd.title, cd.content, cd.word_count
      FROM corpus_documents cd
      JOIN projects p ON p.id = cd.project_id
      WHERE p.user_id = $1 AND cd.is_folder = false AND cd.content IS NOT NULL
+       AND cd.id NOT IN (SELECT id FROM trash)
      ORDER BY cd.word_count DESC
      LIMIT 50`,
     [userId]

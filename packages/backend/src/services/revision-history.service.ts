@@ -51,6 +51,9 @@ interface ImportDiff {
   added?: Array<{ title: string; uuid?: string }>;
   modified?: Array<{ title: string; uuid?: string; oldWordCount: number; newWordCount: number }>;
   deleted?: Array<{ title: string; uuid?: string }>;
+  renamed?: Array<{ uuid: string; oldTitle: string; newTitle: string }>;
+  moved?: Array<{ uuid: string; title: string; from: string; to: string }>;
+  reordered?: Array<{ uuid: string | null; title: string }>;
 }
 
 export interface ChangesBudget {
@@ -96,8 +99,19 @@ export async function loadManuscriptChanges(
   const added = new Map<string, string>();
   const modified = new Map<string, { title: string; uuid?: string; oldWordCount: number; newWordCount: number }>();
   const deleted = new Map<string, string>();
+  // Net renames and moves: first "before", last "after".
+  const renamed = new Map<string, { from: string; to: string }>();
+  const moved = new Map<string, { title: string; from: string; to: string }>();
+  const reordered = new Map<string, string>();
   for (const { diff_summary: diff } of imports.rows) {
     if (!diff) continue;
+    for (const r of diff.renamed ?? []) {
+      renamed.set(r.uuid, { from: renamed.get(r.uuid)?.from ?? r.oldTitle, to: r.newTitle });
+    }
+    for (const m of diff.moved ?? []) {
+      moved.set(m.uuid, { title: m.title, from: moved.get(m.uuid)?.from ?? m.from, to: m.to });
+    }
+    for (const r of diff.reordered ?? []) reordered.set(r.uuid ?? '', r.title);
     for (const a of diff.added ?? []) added.set(a.uuid ?? a.title, a.title);
     for (const m of diff.modified ?? []) {
       const key = m.uuid ?? m.title;
@@ -157,7 +171,28 @@ export async function loadManuscriptChanges(
   // Biggest changes first.
   revised.sort((a, b) => b.size - a.size || a.title.localeCompare(b.title, 'en'));
 
-  if (added.size === 0 && deleted.size === 0 && revised.length === 0) return null;
+  // Drop renames and moves that ended where they started, and anything about
+  // pieces that came or went entirely.
+  for (const [key, r] of renamed) if (r.from === r.to || added.has(key) || deleted.has(key)) renamed.delete(key);
+  for (const [key, m] of moved) if (m.from === m.to || added.has(key) || deleted.has(key)) moved.delete(key);
+  const renamedLines = [...renamed.values()]
+    .map((r) => `"${r.from}" is now "${r.to}"`)
+    .sort((a, b) => a.localeCompare(b, 'en'));
+  const movedLines = [...moved.values()]
+    .map((m) => `${m.title}: from ${m.from} to ${m.to}`)
+    .sort((a, b) => a.localeCompare(b, 'en'));
+  const reorderedTitles = [...reordered.values()].sort((a, b) => a.localeCompare(b, 'en'));
+
+  if (
+    added.size === 0 &&
+    deleted.size === 0 &&
+    revised.length === 0 &&
+    renamedLines.length === 0 &&
+    movedLines.length === 0 &&
+    reorderedTitles.length === 0
+  ) {
+    return null;
+  }
 
   const lines: string[] = [
     since
@@ -168,6 +203,9 @@ export async function loadManuscriptChanges(
     [...m.values()].sort((a, b) => a.localeCompare(b, 'en'));
   if (added.size > 0) lines.push('', `New pieces: ${sortedTitles(added).join('; ')}`);
   if (deleted.size > 0) lines.push('', `Removed from the binder: ${sortedTitles(deleted).join('; ')}`);
+  if (movedLines.length > 0) lines.push('', `Moved:\n${movedLines.map((l) => `- ${l}`).join('\n')}`);
+  if (renamedLines.length > 0) lines.push('', `Renamed:\n${renamedLines.map((l) => `- ${l}`).join('\n')}`);
+  if (reorderedTitles.length > 0) lines.push('', `Pieces put in a new order within: ${reorderedTitles.join('; ')}`);
   if (revised.length > 0) {
     lines.push('', 'Revised:');
     let used = 0;

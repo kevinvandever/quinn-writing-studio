@@ -68,6 +68,9 @@ interface ExistingRow {
   content_hash: string | null;
   word_count: number | null;
   is_folder: boolean;
+  sort_order: number | null;
+  /** Scrivener UUID of the parent row, or null at the top level. */
+  parent_source_id: string | null;
 }
 
 /** Thrown for input that would wipe the corpus rather than update it. */
@@ -99,9 +102,11 @@ export async function applyScrivenerImport(
     ]);
 
     const existingResult = await client.query<ExistingRow>(
-      `SELECT id, source_id, title, content, content_hash, word_count, is_folder
-       FROM corpus_documents
-       WHERE project_id = $1 AND source_type = 'scrivener'`,
+      `SELECT d.id, d.source_id, d.title, d.content, d.content_hash, d.word_count, d.is_folder,
+              d.sort_order, p.source_id AS parent_source_id
+       FROM corpus_documents d
+       LEFT JOIN corpus_documents p ON p.id = d.parent_id
+       WHERE d.project_id = $1 AND d.source_type = 'scrivener'`,
       [projectId]
     );
     const existing = existingResult.rows;
@@ -120,13 +125,20 @@ export async function applyScrivenerImport(
         title: r.title ?? '',
         content_hash: r.content_hash ?? '',
         word_count: r.word_count ?? 0,
+        parent_source_id: r.parent_source_id,
+        sort_order: r.sort_order,
       }))
     );
 
+    // Renames, moves, and reorders count: before, a sync that only moved a
+    // piece (say, from SALVAGE into the book) was skipped as "unchanged".
     const unchanged =
       diffSummary.added.length === 0 &&
       diffSummary.modified.length === 0 &&
-      diffSummary.deleted.length === 0;
+      diffSummary.deleted.length === 0 &&
+      (diffSummary.renamed?.length ?? 0) === 0 &&
+      (diffSummary.moved?.length ?? 0) === 0 &&
+      (diffSummary.reordered?.length ?? 0) === 0;
     if (input.skipIfUnchanged && unchanged) {
       await client.query('ROLLBACK');
       return { importId: null, diffSummary };

@@ -12,8 +12,8 @@
  * the whole collection, not just the dozen pieces whose full text happens to
  * be loaded for a given turn.
  *
- * Summaries are keyed by content_hash, so a piece is only re-summarized when
- * its text actually changes.
+ * Summaries are keyed by content_hash and SUMMARY_VERSION, so a piece is
+ * re-summarized only when its text changes or the summarizer improves.
  */
 import { query } from '../db/connection.js';
 import { sendMessage, type ModelSelection } from './claude-api.service.js';
@@ -21,6 +21,16 @@ import { logApiUsage } from './usage-tracking.service.js';
 
 // In-memory guard so we never run two summary passes for the same project at once.
 const inFlight = new Set<string>();
+
+/**
+ * Version 2 reads the whole piece (version 1 read only the first 8,000
+ * characters). Version-1 summaries of pieces longer than that are redone.
+ */
+const SUMMARY_VERSION = 2;
+const V1_CHARS = 8_000;
+
+/** Text sent per piece. Longer pieces keep their opening and their ending. */
+const SUMMARY_TEXT_CAP = 60_000;
 
 interface SummaryResult {
   summary: string;
@@ -46,8 +56,12 @@ async function summarizeDocument(
   title: string,
   content: string
 ): Promise<{ result: SummaryResult; inputTokens: number; outputTokens: number; model: ModelSelection } | null> {
-  // Cap the text we send — the opening and a tail are plenty to characterize a piece.
-  const excerpt = content.length > 8000 ? content.slice(0, 8000) : content;
+  // The whole piece: a logline built from the opening alone misses where an
+  // essay goes, and endings matter. Very long documents keep both ends.
+  const excerpt =
+    content.length > SUMMARY_TEXT_CAP
+      ? `${content.slice(0, SUMMARY_TEXT_CAP * 0.75)}\n\n[… middle left out …]\n\n${content.slice(content.length - SUMMARY_TEXT_CAP * 0.25)}`
+      : content;
 
   const response = await sendMessage({
     systemPrompt: `You index a writer's manuscript. Given one piece, produce a compact entry another coach can scan.
@@ -128,10 +142,12 @@ export async function findDocumentsNeedingSummaries(
         AND (
           d.metadata->>'summary' IS NULL
           OR d.metadata->>'summaryHash' IS DISTINCT FROM d.content_hash
+          OR (length(d.content) > $4
+              AND COALESCE(d.metadata->>'summaryVersion', '1') <> $3::text)
         )
       ORDER BY (t.area = 'book') DESC, d.word_count DESC NULLS LAST
       LIMIT $2`,
-    [projectId, limit]
+    [projectId, limit, SUMMARY_VERSION, V1_CHARS]
   );
   return result.rows;
 }
@@ -175,6 +191,7 @@ export async function ensureCorpusSummaries(
               summary: summarized.result.summary,
               themes: summarized.result.themes,
               summaryHash: doc.content_hash ?? null,
+              summaryVersion: SUMMARY_VERSION,
             }),
           ]
         );

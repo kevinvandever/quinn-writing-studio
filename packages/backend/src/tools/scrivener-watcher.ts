@@ -30,7 +30,12 @@ import 'dotenv/config';
 import { watch, existsSync, readFileSync, writeFileSync, readdirSync, statSync } from 'fs';
 import { join } from 'path';
 import { createHash } from 'crypto';
-import { parseScrivenerZip, flattenDocuments } from '../services/scrivener-parser.service.js';
+import {
+  parseScrivenerZip,
+  flattenDocuments,
+  type ParsedSnapshot,
+  type ScrivenerParseResult,
+} from '../services/scrivener-parser.service.js';
 
 // ─── Configuration ───────────────────────────────────────────────────────────
 
@@ -182,9 +187,84 @@ async function syncCorpus(): Promise<void> {
   const state = loadState();
   if (state && state.lastCorpusHash === corpusHash) {
     console.log('[Sync] No content changes since last sync. Skipping upload.');
-    return;
+  } else {
+    await uploadCorpus(parseResult, corpusHash, backup.path);
   }
 
+  // A new snapshot doesn't always come with a text change, so check every time.
+  await syncSnapshots(parseResult.snapshots ?? []);
+}
+
+/** Call the backend with the watcher's token, logging in again once if it expired. */
+async function apiFetch(path: string, init: { method: 'GET' | 'POST'; body?: unknown }): Promise<Response> {
+  const send = (token: string): Promise<Response> =>
+    fetch(`${API_URL}${path}`, {
+      method: init.method,
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: init.body === undefined ? undefined : JSON.stringify(init.body),
+    });
+  let response = await send(await getToken());
+  if (response.status === 401) {
+    authToken = await authenticate();
+    response = await send(authToken);
+  }
+  return response;
+}
+
+const SNAPSHOT_BATCH_CHARS = 2_000_000;
+const SNAPSHOT_BATCH_COUNT = 500;
+
+/**
+ * Upload Scrivener snapshots the backend doesn't have yet. They become draft
+ * versions there, so Quinn can see how a piece has changed over time.
+ */
+async function syncSnapshots(snapshots: ParsedSnapshot[]): Promise<void> {
+  if (snapshots.length === 0) return;
+  const keysResponse = await apiFetch(`/api/projects/${PROJECT_ID}/corpus/snapshots/keys`, { method: 'GET' });
+  if (!keysResponse.ok) {
+    console.warn(`[Snapshots] Couldn't check which snapshots the backend has (${keysResponse.status}); skipping.`);
+    return;
+  }
+  const { keys } = (await keysResponse.json()) as { keys: string[] };
+  const have = new Set(keys);
+  const missing = snapshots.filter(
+    (s) => !have.has(`${s.uuid}|${s.takenAt}`) && s.content.length < 1_900_000
+  );
+  if (missing.length === 0) return;
+
+  console.log(`[Snapshots] Uploading ${missing.length} Scrivener snapshot(s)...`);
+  let stored = 0;
+  let batch: ParsedSnapshot[] = [];
+  let chars = 0;
+  const flush = async (): Promise<void> => {
+    if (batch.length === 0) return;
+    const response = await apiFetch(`/api/projects/${PROJECT_ID}/corpus/snapshots`, {
+      method: 'POST',
+      body: { snapshots: batch },
+    });
+    if (!response.ok) {
+      throw new Error(`Snapshot upload failed (${response.status}): ${await response.text()}`);
+    }
+    stored += ((await response.json()) as { stored: number }).stored;
+    batch = [];
+    chars = 0;
+  };
+  for (const snapshot of missing) {
+    if (batch.length >= SNAPSHOT_BATCH_COUNT || chars + snapshot.content.length > SNAPSHOT_BATCH_CHARS) {
+      await flush();
+    }
+    batch.push(snapshot);
+    chars += snapshot.content.length;
+  }
+  await flush();
+  console.log(`[Snapshots] Stored ${stored} new snapshot(s).`);
+}
+
+async function uploadCorpus(
+  parseResult: ScrivenerParseResult,
+  corpusHash: string,
+  backupPath: string
+): Promise<void> {
   console.log(`[Sync] Changes detected. ${parseResult.documentCount} documents, ${parseResult.totalWordCount} words.`);
 
   if (parseResult.parseErrors.length > 0) {
@@ -253,7 +333,7 @@ async function syncCorpus(): Promise<void> {
   saveState({
     lastCorpusHash: corpusHash,
     lastSyncAt: new Date().toISOString(),
-    lastBackupFile: backup.path,
+    lastBackupFile: backupPath,
   });
 }
 

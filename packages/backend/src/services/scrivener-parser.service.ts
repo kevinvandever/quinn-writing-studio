@@ -10,6 +10,7 @@ import AdmZip from 'adm-zip';
 import { XMLParser } from 'fast-xml-parser';
 import { createHash } from 'crypto';
 import { stripRtf } from '../utils/rtf-parser.js';
+import { comparableText } from '../utils/paragraph-diff.js';
 
 export interface ParsedDocument {
   uuid: string;
@@ -28,12 +29,27 @@ export interface ParsedDocument {
   children: ParsedDocument[];
 }
 
+/** One Scrivener snapshot: a version of a document the writer (or Scrivener) saved. */
+export interface ParsedSnapshot {
+  /** Binder UUID of the document. */
+  uuid: string;
+  /** When it was taken, as an ISO timestamp (UTC). */
+  takenAt: string;
+  /** Scrivener's snapshot title, e.g. "Untitled Snapshot" or "Published". */
+  title: string;
+  content: string;
+  wordCount: number;
+  contentHash: string;
+}
+
 export interface ScrivenerParseResult {
   documents: ParsedDocument[];
   totalWordCount: number;
   documentCount: number;
   parseErrors: Array<{ documentName: string; error: string }>;
   filename: string;
+  /** Snapshots of documents outside Trash, oldest first, without repeats. */
+  snapshots?: ParsedSnapshot[];
 }
 
 export interface DiffSummary {
@@ -174,13 +190,117 @@ export function parseScrivenerZip(zipBuffer: Buffer, filename: string): Scrivene
 
   const documents = processBinderItems(binderItems);
 
+  // Snapshots are kept for documents outside Trash only.
+  const liveUuids = new Set<string>();
+  const collectLive = (docs: ParsedDocument[]): void => {
+    for (const d of docs) {
+      if (d.scrivenerType === 'TrashFolder') continue;
+      if (!d.isFolder) liveUuids.add(d.uuid);
+      collectLive(d.children);
+    }
+  };
+  collectLive(documents);
+  const snapshots = parseSnapshots(zip, rootPrefix, liveUuids, parseErrors);
+
   return {
     documents,
     totalWordCount,
     documentCount,
     parseErrors,
     filename,
+    snapshots,
   };
+}
+
+/** "2025-09-01 22:40:54 +0100" (index.xml) or "2025-09-01-17-40-54-0400" (file name) → epoch ms. */
+function parseSnapshotTime(value: string): number | null {
+  const m = value
+    .trim()
+    .match(/^(\d{4})-(\d{2})-(\d{2})[ -](\d{2})[:-](\d{2})[:-](\d{2}) ?([+-])(\d{2})(\d{2})$/);
+  if (!m) return null;
+  const [, y, mo, d, h, mi, s, sign, tzh, tzm] = m;
+  const ms = Date.parse(`${y}-${mo}-${d}T${h}:${mi}:${s}${sign}${tzh}:${tzm}`);
+  return Number.isNaN(ms) ? null : ms;
+}
+
+/**
+ * Read Scrivener's snapshots: Snapshots/<UUID>.snapshots/ holds one RTF per
+ * snapshot, named for the time it was taken, and an index.xml with titles.
+ * Consecutive snapshots with the same text are kept once. "Same" ignores
+ * extraction debris such as comment links, whose ids change between
+ * Scrivener's automatic snapshots of an otherwise unchanged document.
+ */
+function parseSnapshots(
+  zip: AdmZip,
+  rootPrefix: string,
+  liveUuids: Set<string>,
+  parseErrors: Array<{ documentName: string; error: string }>
+): ParsedSnapshot[] {
+  const prefix = `${rootPrefix}Snapshots/`;
+  const folders = new Map<string, { index: AdmZip.IZipEntry | null; files: AdmZip.IZipEntry[] }>();
+  for (const entry of zip.getEntries()) {
+    if (entry.isDirectory || !entry.entryName.startsWith(prefix)) continue;
+    const m = entry.entryName.slice(prefix.length).match(/^([0-9A-Za-z-]+)\.snapshots\/([^/]+)$/);
+    if (!m || !liveUuids.has(m[1]!)) continue;
+    const folder = folders.get(m[1]!) ?? { index: null, files: [] };
+    if (m[2] === 'index.xml') folder.index = entry;
+    else if (m[2]!.endsWith('.rtf')) folder.files.push(entry);
+    folders.set(m[1]!, folder);
+  }
+
+  // parseTagValue off, so a title like "2" stays a string.
+  const xml = new XMLParser({ isArray: (name) => name === 'Snapshot', parseTagValue: false });
+  const snapshots: ParsedSnapshot[] = [];
+  for (const [uuid, folder] of folders) {
+    // Titles by time, from index.xml.
+    const titles = new Map<number, string>();
+    if (folder.index) {
+      try {
+        const parsed = xml.parse(folder.index.getData().toString('utf-8'));
+        for (const snap of parsed?.Snapshots?.Snapshot ?? []) {
+          const time = parseSnapshotTime(String(snap?.Date ?? ''));
+          const title = typeof snap?.Title === 'string' ? snap.Title.trim() : '';
+          if (time !== null && title) titles.set(time, title);
+        }
+      } catch {
+        // Titles are a nicety; the snapshots themselves still parse.
+      }
+    }
+
+    const versions: ParsedSnapshot[] = [];
+    for (const file of folder.files) {
+      const name = file.entryName.slice(file.entryName.lastIndexOf('/') + 1, -'.rtf'.length);
+      const time = parseSnapshotTime(name);
+      if (time === null) continue;
+      try {
+        const content = stripRtf(file.getData().toString('utf-8'));
+        if (!content.trim()) continue;
+        versions.push({
+          uuid,
+          takenAt: new Date(time).toISOString(),
+          title: titles.get(time) ?? 'Untitled Snapshot',
+          content,
+          wordCount: computeWordCount(content),
+          contentHash: computeHash(content),
+        });
+      } catch (err) {
+        parseErrors.push({
+          documentName: `snapshot ${name} of ${uuid}`,
+          error: err instanceof Error ? err.message : 'Unknown error',
+        });
+      }
+    }
+    versions.sort((a, b) => a.takenAt.localeCompare(b.takenAt));
+    let previous: string | null = null;
+    for (const v of versions) {
+      const comparable = comparableText(v.content);
+      if (comparable === previous) continue;
+      previous = comparable;
+      snapshots.push(v);
+    }
+  }
+  snapshots.sort((a, b) => a.takenAt.localeCompare(b.takenAt) || a.uuid.localeCompare(b.uuid));
+  return snapshots;
 }
 
 /**

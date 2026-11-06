@@ -93,6 +93,23 @@ export function stripRtf(rtfContent: string): string {
 }
 
 /**
+ * Windows-1252 characters in the 0x80-0x9F range. RTF writes curly quotes,
+ * apostrophes, and dashes as \'91-\'97; decoded as Latin-1 they become
+ * invisible control characters (U+0080-U+009F).
+ */
+const CP1252_CONTROLS: Record<number, string> = {
+  0x80: '€', 0x82: '‚', 0x83: 'ƒ', 0x84: '„', 0x85: '…', 0x86: '†', 0x87: '‡',
+  0x88: 'ˆ', 0x89: '‰', 0x8a: 'Š', 0x8b: '‹', 0x8c: 'Œ', 0x8e: 'Ž', 0x91: '‘',
+  0x92: '’', 0x93: '“', 0x94: '”', 0x95: '•', 0x96: '–', 0x97: '—', 0x98: '˜',
+  0x99: '™', 0x9a: 'š', 0x9b: '›', 0x9c: 'œ', 0x9e: 'ž', 0x9f: 'Ÿ',
+};
+
+/** Replace U+0080-U+009F control characters with the Windows-1252 characters they stand for. */
+export function decodeCp1252Controls(text: string): string {
+  return text.replace(/[\u0080-\u009f]/g, (c) => CP1252_CONTROLS[c.charCodeAt(0)] ?? '');
+}
+
+/**
  * Remove RTF groups that start with a specific keyword.
  * Handles nested braces correctly.
  */

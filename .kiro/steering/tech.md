@@ -21,7 +21,7 @@ npm workspaces monorepo with two packages: `packages/frontend` and `packages/bac
 - **Cache/Queue**: Redis via `ioredis`, job queue via `bull`
 - **Scheduling**: `node-cron` for background intelligence jobs
 - **AI**: `@anthropic-ai/sdk` — Claude Sonnet 5.5 (everyday coaching, medium effort), Opus 5.5 (workflows and deep modes, high effort), Haiku 5.5 (background jobs: intelligence curation, nudges). IDs default in `claude-api.service.ts` and can be overridden with `CLAUDE_SONNET_MODEL` / `CLAUDE_OPUS_MODEL` / `CLAUDE_HAIKU_MODEL`; prices for cost tracking live in `usage-tracking.service.ts`. Current models think before answering and thinking counts toward `max_tokens`, so don't lower the caps casually. Dates/times in prompts use `WRITER_TIME_ZONE` (default `America/New_York`) because Railway runs in UTC.
-- **Prompt caching (coaching turns)**: `assemblePrompt` in `claude-api.service.ts` builds two system blocks with 1-hour cache breakpoints (block 1: persona, ethics, task protocol, brief, the full manuscript; block 2: binder map, first-rights, Quinn's notebook, Session Memory), and per-turn context (time, activity, workflow step, retrieved material) that `buildApiMessages` attaches to the writer's newest message, plus a breakpoint on Quinn's last reply. Anything that changes per turn must stay out of the system blocks, and the blocks must be byte-identical across turns (deterministic ordering in every query that feeds them), or every turn pays a full cache write. For the same reason, long sittings drop old messages in 40k-character chunks rather than one message per turn. `/analyze` and essay triage (`readsWholeCorpus`) also put everything outside the book (minus Trash) in block 1.
+- **Prompt caching (coaching turns)**: `assemblePrompt` in `claude-api.service.ts` builds two system blocks with 1-hour cache breakpoints (block 1: persona, ethics, task protocol, brief, the full manuscript; block 2: binder map, first-rights, manuscript changes since the last session, Quinn's notebook, Session Memory), and per-turn context (time, activity, workflow step, retrieved material) that `buildApiMessages` attaches to the writer's newest message, plus a breakpoint on Quinn's last reply. Anything that changes per turn must stay out of the system blocks, and the blocks must be byte-identical across turns (deterministic ordering in every query that feeds them), or every turn pays a full cache write. For the same reason, long sittings drop old messages in 40k-character chunks rather than one message per turn. `/analyze` and essay triage (`readsWholeCorpus`) also put everything outside the book (minus Trash) in block 1.
 - **Auth**: `bcrypt` for password hashing, `jsonwebtoken` for JWT in HTTP-only cookies
 - **Validation**: `zod` for request/env validation
 - **Security**: `helmet`, `express-rate-limit` with Redis store, AES-256-GCM encryption for sensitive fields
@@ -78,7 +78,7 @@ Only the **Scrivener watcher** (`npm run scriv:watch -w @quinn/backend`). The lo
 - `QUINN_API_URL` (the Railway backend URL the watcher syncs to)
 - `QUINN_EMAIL` / `QUINN_PASSWORD` (login creds for the watcher)
 
-It is NOT a full backend `.env` and cannot run the backend. The watcher detects new Scrivener backups and POSTs parsed corpus data to the Railway backend's `/corpus/sync` endpoint.
+It is NOT a full backend `.env` and cannot run the backend. The watcher detects new Scrivener backups and POSTs parsed corpus data to the Railway backend's `/corpus/sync` endpoint. After every backup it also uploads any Scrivener snapshots the backend doesn't have yet (`GET /corpus/snapshots/keys`, then `POST /corpus/snapshots`). The watcher runs from source in this repo, so **restart it after changing watcher or parser code**; pushing to `main` doesn't update it.
 
 ### Practical implications
 
@@ -95,8 +95,8 @@ Commands are typed into the coaching chat input (there is no separate palette). 
 
 1. **`services/coaching-workflows.ts`** — the registry, and the source of truth for anything that drives the model:
    - *Workflows* (multi-step, step-gated): `/essay-triage` (Plan Collection), `/editorial-pass` (Review Essay)
-   - *Prompt modes* (single-shot): `/analyze`, `/central-question`, `/submission-ready`, `/place-this`, `/coach`, `/progress`, `/checkin`
-   - Flags per entry: `projectTypes` (availability), `targetsSinglePiece` (forces full text), `preferOpus` (model routing), `includePublishingOpportunities` (injects Intelligence feed items)
+   - *Prompt modes* (single-shot): `/analyze`, `/central-question`, `/submission-ready`, `/place-this`, `/revisions`, `/coach`, `/progress`, `/checkin`
+   - Flags per entry: `projectTypes` (availability), `targetsSinglePiece` (forces full text), `preferOpus` (model routing), `readsWholeCorpus` (outside material in full), `includePublishingOpportunities` (injects Intelligence feed items), `includeRevisionHistory` (injects the named piece's versions)
 
 2. **`services/coaching.service.ts` → `handleSlashCommand()`** — built-in commands that need DB writes or a static reply, so they are NOT in the registry:
    - `/help`, `/next`, `/back`, `/exit`
@@ -112,3 +112,9 @@ The original BMAD agent definition lives OUTSIDE this repo at:
 ### Quinn's notebook (long-term memory)
 
 `services/notebook.service.ts`. Per project: coaching preferences, decisions, open threads, notes on pieces, patterns, breakthroughs. When a session ends, Sonnet reads the transcript plus the current notebook and returns edits (add/update/remove), applied in code with per-kind limits. The first notebook for a project reads back through the 12 most recent sessions (600k-character budget). A watermark of the last folded session means failed updates are retried by the hourly session-closer job. Stored migration-free as versioned `[[QUINN_NOTEBOOK]]` system messages (latest wins, 30 kept), written under a Postgres advisory lock so `/forget` and an update can't overwrite each other. It renders into cached block 2; the opener also gets the open threads. API spend is logged under the `notebook` feature area.
+
+### Revision history
+
+Versions of a piece live in `draft_snapshots`. Two sources: `pre_import_update` rows, which a sync writes with a piece's old text whenever it changes it; and Scrivener's own snapshots, parsed from `Snapshots/<UUID>.snapshots/` in the backup and stored as `manual` rows with `created_at` = when Scrivener took them. Migration-free: a Scrivener snapshot's title lives in the document's `metadata.scrivenerSnapshots` (`{ "<ISO time>": "<title>" }`), which is also the dedupe key the watcher checks, so a version deleted in the app isn't re-uploaded. Versions are compared with `utils/paragraph-diff.ts`, which ignores RTF extraction debris (comment-link ids, trailing backslashes, cp1252 quotes) so Scrivener's automatic snapshots don't read as edits.
+
+`revision-history.service.ts` feeds "Manuscript Changes Since Your Last Session" (passages cut, added, and rewritten since the last session ended; cached block 2, plus a smaller version for the opener) and the `/revisions <piece>` mode (timeline, earliest version in full, latest diffs).

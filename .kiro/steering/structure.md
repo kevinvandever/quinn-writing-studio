@@ -25,7 +25,10 @@ quinn-writing-studio/
 │   │   │   │   ├── submission-tracking.service.ts  # Earmarks, first-rights conflicts, opportunities
 │   │   │   │   ├── target-venues.ts             # Curated journal shortlist (EDIT HERE to add venues)
 │   │   │   │   ├── ethics.service.ts            # Writing ethics enforcement
-│   │   │   │   ├── scrivener-parser.service.ts  # .scriv import
+│   │   │   │   ├── scrivener-parser.service.ts  # .scriv import (binder, text, and Scrivener snapshots)
+│   │   │   │   ├── scrivener-snapshots.service.ts # Stores Scrivener snapshots as draft versions (titles in metadata)
+│   │   │   │   ├── revision-history.service.ts  # Changes since last session (with passages) + /revisions history
+│   │   │   │   ├── piece-index.service.ts       # Every document outside Trash, with binder location; title lookup
 │   │   │   │   ├── scrivener-sync.service.ts    # Applies a parsed binder in place, keyed by Scrivener UUID (keeps summaries, earmarks, snapshots)
 │   │   │   │   ├── manuscript-context.service.ts # Full text of the book (Draft folder + front/back matter) for the cached prompt
 │   │   │   │   ├── notebook.service.ts          # Quinn's notebook: long-term notes per project, revised after each session
@@ -48,6 +51,7 @@ quinn-writing-studio/
 │   │   │   └── utils/
 │   │   │       ├── encryption.ts        # AES-256-GCM encrypt/decrypt
 │   │   │       ├── time.ts              # Dates/times in the writer's time zone
+│   │   │       ├── paragraph-diff.ts    # Paragraph-level diff of prose (ignores RTF debris)
 │   │   │       └── rtf-parser.ts        # RTF to plain text
 │   │   ├── Dockerfile
 │   │   ├── railway.toml
@@ -97,10 +101,15 @@ section in `tech.md` for the path.
 
 ### Orphaned components
 
-As of the last audit there are **none** — every component under `components/` is
-reachable. Three were found and resolved: `intelligence/IntelligenceFeed.tsx` and
+An earlier audit resolved three: `intelligence/IntelligenceFeed.tsx` and
 `layout/ProjectSwitcher.tsx` were deleted, and `settings/UsageDashboard.tsx` was
 wired into `settings/SettingsPanel.tsx` against the new `/api/usage` endpoint.
+
+Still orphaned (found November 2026): `drafts/DraftVersions.tsx`, a full version
+list and diff viewer over `/api/documents/:id/snapshots`. Nothing imports it; the
+`/projects/:id/drafts/:docId` route renders `pages/DraftVersions.tsx`, a "coming
+soon" placeholder. Draft versions (including Scrivener snapshots) exist in the
+backend but have no UI yet.
 
 Before editing a component, confirm something imports it:
 ```bash

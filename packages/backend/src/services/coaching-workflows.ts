@@ -65,6 +65,11 @@ export interface PromptCommand {
   /** See CoachingWorkflow.readsWholeCorpus. */
   readsWholeCorpus?: boolean;
   /**
+   * Include the named piece's revision history: its stored versions over time,
+   * the earliest in full, and its latest changes.
+   */
+  includeRevisionHistory?: boolean;
+  /**
    * Include publishing opportunities from the Intelligence feed in context, so
    * suggestions point at real open calls rather than half-remembered journals.
    */
@@ -197,6 +202,16 @@ const PROMPT_COMMANDS: PromptCommand[] = [
     includePublishingOpportunities: true,
     instruction:
       `Recommend where to submit the named piece. Its full text is in The Manuscript section, or in the retrieved material if it lives outside the book; if you can't find it, ask the writer to name it and stop. Then: (1) characterize what the piece actually is — length, register, subject, what kind of venue it suits; (2) recommend specific journals, drawing FIRST on the Publishing Opportunities list if present (real open calls with deadlines), then on well-established venues for personal essay and creative nonfiction; (3) for each, say why this piece fits that venue and note the word-count fit explicitly, since limits disqualify more submissions than quality does. Give a mixed slate — a couple of reaches, a few mid-tier, one or two likely — because simultaneous submissions are standard. Never invent a reading period, deadline, fee, or word limit: if you aren't certain, say the writer must confirm on the journal's site. Close with a concrete next action.`,
+  },
+  {
+    id: 'revisions',
+    aliases: ['rev', 'versions'],
+    label: 'Revision History',
+    description: 'How a piece has changed across its saved versions. Name the piece.',
+    targetsSinglePiece: true,
+    includeRevisionHistory: true,
+    instruction:
+      `Talk with the writer about how the named piece has changed, using its Revision History (below) and its current text (in The Manuscript section, or in the retrieved material if it lives outside the book). If no piece is named or it can't be found, ask which piece and stop. Read the earliest version against the current one and trace the arc: what the writer cut, what they added, what they keep circling back to, how the voice and the ending moved. Say which changes made the piece stronger and why, and point out anything an earlier version had that might be worth recovering, quoting a few words so the writer can find it. If only one version is stored, or none, say so plainly and offer to look at the piece as it stands. Point at passages; never draft replacement text.`,
   },
   {
     id: 'coach',

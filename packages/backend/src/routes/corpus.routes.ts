@@ -24,6 +24,11 @@ import {
 } from '../services/scrivener-sync.service.js';
 import { checkDocumentThemes } from '../services/theme-analysis.service.js';
 import { ensureCorpusSummaries } from '../services/corpus-summary.service.js';
+import {
+  loadSnapshotKeys,
+  snapshotUploadSchema,
+  storeScrivenerSnapshots,
+} from '../services/scrivener-snapshots.service.js';
 
 const router = Router();
 
@@ -124,7 +129,17 @@ router.post(
     // Generate per-document summaries in the background (non-blocking).
     void ensureCorpusSummaries(projectId as string, userId);
 
+    // Scrivener's snapshots become draft versions, for revision history.
+    // A failure here shouldn't fail an import that already succeeded.
+    let snapshots = { stored: 0, skipped: 0 };
+    try {
+      snapshots = await storeScrivenerSnapshots(projectId as string, parseResult.snapshots ?? []);
+    } catch (err) {
+      console.warn('[Corpus] Storing Scrivener snapshots failed:', err instanceof Error ? err.message : err);
+    }
+
     res.status(201).json({
+      snapshots,
       import: {
         id: importId,
         filename: parseResult.filename,
@@ -309,6 +324,37 @@ router.post('/projects/:id/corpus/sync', asyncHandler(async (req: Request, res: 
       diffSummary,
     },
   });
+}));
+
+/** Throw a 404 unless the project belongs to the user. */
+async function requireOwnedProject(projectId: string, userId: string): Promise<void> {
+  const result = await query('SELECT 1 FROM projects WHERE id = $1 AND user_id = $2', [projectId, userId]);
+  if (result.rows.length === 0) {
+    throw new AppError(404, ErrorCodes.NOT_FOUND, 'Project not found');
+  }
+}
+
+/**
+ * GET /api/projects/:id/corpus/snapshots/keys
+ * Which Scrivener snapshots the server has ("<document UUID>|<ISO time>"), so
+ * the watcher uploads only new ones.
+ */
+router.get('/projects/:id/corpus/snapshots/keys', asyncHandler(async (req: Request, res: Response) => {
+  const projectId = req.params.id as string;
+  await requireOwnedProject(projectId, req.user!.userId);
+  res.json({ keys: await loadSnapshotKeys(projectId) });
+}));
+
+/**
+ * POST /api/projects/:id/corpus/snapshots
+ * Store Scrivener snapshots the watcher parsed from a backup, as draft
+ * versions. Snapshots the project already has are skipped.
+ */
+router.post('/projects/:id/corpus/snapshots', asyncHandler(async (req: Request, res: Response) => {
+  const projectId = req.params.id as string;
+  const { snapshots } = snapshotUploadSchema.parse(req.body);
+  await requireOwnedProject(projectId, req.user!.userId);
+  res.status(201).json(await storeScrivenerSnapshots(projectId, snapshots));
 }));
 
 /**

@@ -14,6 +14,7 @@
  */
 import { z } from 'zod';
 import { getClient, query } from '../db/connection.js';
+import { decodeCp1252Controls } from '../utils/rtf-parser.js';
 
 export const snapshotUploadSchema = z.object({
   snapshots: z
@@ -82,10 +83,11 @@ export async function storeScrivenerSnapshots(
         skipped++;
         continue;
       }
+      // Curly quotes and dashes from older watchers arrive as control characters.
       await client.query(
         `INSERT INTO draft_snapshots (document_id, content, word_count, trigger, created_at)
          VALUES ($1, $2, $3, 'manual', $4)`,
-        [doc.id, snap.content, snap.wordCount, takenAt]
+        [doc.id, decodeCp1252Controls(snap.content), snap.wordCount, takenAt]
       );
       const entries = pending ?? {};
       entries[takenAt] = snap.title.trim() || 'Untitled Snapshot';

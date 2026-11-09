@@ -16,10 +16,17 @@
  * Only pieces that have left the binder entirely are deleted. Scrivener's Trash
  * is part of the binder, so trashed pieces keep their rows until Trash is emptied.
  */
+import { createHash } from 'crypto';
 import type { PoolClient } from 'pg';
 import { z } from 'zod';
 import { getClient } from '../db/connection.js';
-import { detectChanges, type DiffSummary, type ParsedDocument } from './scrivener-parser.service.js';
+import { decodeCp1252Controls } from '../utils/rtf-parser.js';
+import {
+  detectChanges,
+  flattenDocuments,
+  type DiffSummary,
+  type ParsedDocument,
+} from './scrivener-parser.service.js';
 
 // ─── Input validation ────────────────────────────────────────────────────────
 
@@ -71,6 +78,24 @@ interface ExistingRow {
   sort_order: number | null;
   /** Scrivener UUID of the parent row, or null at the top level. */
   parent_source_id: string | null;
+  /** The content_hash the piece's summary was made from. */
+  summary_hash: string | null;
+}
+
+const sha256 = (text: string): string => createHash('sha256').update(text).digest('hex');
+
+/**
+ * The text as it should be stored, with its hash computed here rather than
+ * trusted from the sender. Parsers before the fix decoded RTF's \'XX escapes
+ * as Latin-1, which turned curly quotes, apostrophes, and dashes into
+ * invisible control characters (U+0080-U+009F); decoding them here fixes text
+ * from any version of the watcher. PostgreSQL rejects null bytes in text.
+ */
+function normalizeDocuments(nodes: ParsedDocument[]): ParsedDocument[] {
+  return nodes.map((node) => {
+    const content = decodeCp1252Controls(node.content || '').replace(/\0/g, '');
+    return { ...node, content, contentHash: sha256(content), children: normalizeDocuments(node.children) };
+  });
 }
 
 /** Thrown for input that would wipe the corpus rather than update it. */
@@ -89,7 +114,8 @@ export class EmptyBinderError extends Error {
 export async function applyScrivenerImport(
   input: ScrivenerImportInput
 ): Promise<ScrivenerImportResult> {
-  const { projectId, userId, documents } = input;
+  const { projectId, userId } = input;
+  const documents = normalizeDocuments(input.documents);
 
   const client = await getClient();
   try {
@@ -103,7 +129,7 @@ export async function applyScrivenerImport(
 
     const existingResult = await client.query<ExistingRow>(
       `SELECT d.id, d.source_id, d.title, d.content, d.content_hash, d.word_count, d.is_folder,
-              d.sort_order, p.source_id AS parent_source_id
+              d.sort_order, p.source_id AS parent_source_id, d.metadata->>'summaryHash' AS summary_hash
        FROM corpus_documents d
        LEFT JOIN corpus_documents p ON p.id = d.parent_id
        WHERE d.project_id = $1 AND d.source_type = 'scrivener'`,
@@ -118,12 +144,26 @@ export async function applyScrivenerImport(
       throw new EmptyBinderError();
     }
 
+    // Pieces stored by the old parser differ from the same text decoded
+    // correctly only in their quotes and dashes. That isn't a revision: the
+    // text is updated without a snapshot, a new "last changed" date, a new
+    // summary, or a place in the list of changes Quinn sees.
+    const incoming = new Map<string, ParsedDocument>();
+    for (const d of flattenDocuments(documents)) if (!incoming.has(d.uuid)) incoming.set(d.uuid, d);
+    const reencoded = new Map<string, ParsedDocument>();
+    for (const r of existing) {
+      const now = r.source_id ? incoming.get(r.source_id) : undefined;
+      if (now && r.content_hash !== now.contentHash && decodeCp1252Controls(r.content ?? '') === now.content) {
+        reencoded.set(r.id, now);
+      }
+    }
+
     const diffSummary = detectChanges(
       documents,
       existing.map((r) => ({
         source_id: r.source_id ?? '',
         title: r.title ?? '',
-        content_hash: r.content_hash ?? '',
+        content_hash: reencoded.get(r.id)?.contentHash ?? r.content_hash ?? '',
         word_count: r.word_count ?? 0,
         parent_source_id: r.parent_source_id,
         sort_order: r.sort_order,
@@ -140,7 +180,21 @@ export async function applyScrivenerImport(
       (diffSummary.moved?.length ?? 0) === 0 &&
       (diffSummary.reordered?.length ?? 0) === 0;
     if (input.skipIfUnchanged && unchanged) {
-      await client.query('ROLLBACK');
+      // Nothing the writer did, so no import is recorded; fixed text is still stored.
+      for (const [id, doc] of reencoded) {
+        await client.query(
+          `UPDATE corpus_documents
+           SET content = $2,
+               content_hash = $3::text,
+               word_count = $4,
+               metadata = CASE WHEN metadata->>'summaryHash' = content_hash
+                               THEN jsonb_set(metadata, '{summaryHash}', to_jsonb($3::text))
+                               ELSE metadata END
+           WHERE id = $1`,
+          [id, doc.content, doc.contentHash, doc.wordCount]
+        );
+      }
+      await client.query(reencoded.size > 0 ? 'COMMIT' : 'ROLLBACK');
       return { importId: null, diffSummary };
     }
 
@@ -159,7 +213,7 @@ export async function applyScrivenerImport(
         await client.query(
           `INSERT INTO draft_snapshots (document_id, content, word_count, trigger)
            VALUES ($1, $2, $3, 'pre_import_update')`,
-          [prior.id, prior.content ?? '', prior.word_count]
+          [prior.id, decodeCp1252Controls(prior.content ?? ''), prior.word_count]
         );
       }
     }
@@ -180,7 +234,8 @@ export async function applyScrivenerImport(
     const importId = importResult.rows[0]!.id;
 
     const keptIds: string[] = [];
-    await upsertNodes(client, projectId, importId, documents, null, existingBySourceId, keptIds);
+    const reencodedIds = new Set(reencoded.keys());
+    await upsertNodes(client, projectId, importId, documents, null, existingBySourceId, reencodedIds, keptIds);
 
     // Remove only pieces that are no longer anywhere in the binder.
     await client.query(
@@ -240,13 +295,13 @@ async function upsertNodes(
   nodes: ParsedDocument[],
   parentId: string | null,
   existingBySourceId: Map<string, ExistingRow>,
+  reencodedIds: Set<string>,
   keptIds: string[]
 ): Promise<void> {
   for (const node of nodes) {
-    // Strip null bytes that PostgreSQL rejects in text columns
-    const content = (node.content || '').replace(/\0/g, '');
+    // Content is already normalized (normalizeDocuments), null bytes included.
+    const content = node.content || '';
     const title = (node.title || '').replace(/\0/g, '').slice(0, 500);
-    const typeMetadata = JSON.stringify({ scrivenerType: node.scrivenerType ?? null });
 
     const prior = existingBySourceId.get(node.uuid);
     // A UUID should appear once per binder; if it repeats, only the first
@@ -255,6 +310,13 @@ async function upsertNodes(
 
     let id: string;
     if (prior) {
+      // Text that only had its quotes and dashes fixed keeps its "last changed"
+      // date, and its summary still describes it.
+      const reencoded = reencodedIds.has(prior.id);
+      const metadata: Record<string, unknown> = { scrivenerType: node.scrivenerType ?? null };
+      if (reencoded && prior.summary_hash && prior.summary_hash === prior.content_hash) {
+        metadata.summaryHash = node.contentHash;
+      }
       // Merge metadata so summaries, themes, and earmarks survive. updated_at
       // moves only when the text changed. (Right-hand sides read the old row.)
       await client.query(
@@ -267,7 +329,7 @@ async function upsertNodes(
              is_folder = $8,
              metadata = COALESCE(metadata, '{}'::jsonb) || $9::jsonb,
              import_id = $10,
-             updated_at = CASE WHEN content_hash IS DISTINCT FROM $4 THEN NOW() ELSE updated_at END,
+             updated_at = CASE WHEN content_hash IS DISTINCT FROM $4 AND NOT $11::boolean THEN NOW() ELSE updated_at END,
              content_hash = $4
          WHERE id = $1`,
         [
@@ -279,8 +341,9 @@ async function upsertNodes(
           parentId,
           node.sortOrder,
           node.isFolder,
-          typeMetadata,
+          JSON.stringify(metadata),
           importId,
+          reencoded,
         ]
       );
       id = prior.id;
@@ -299,7 +362,7 @@ async function upsertNodes(
           parentId,
           node.sortOrder,
           node.isFolder,
-          typeMetadata,
+          JSON.stringify({ scrivenerType: node.scrivenerType ?? null }),
           importId,
         ]
       );
@@ -309,7 +372,7 @@ async function upsertNodes(
     keptIds.push(id);
 
     if (node.children.length > 0) {
-      await upsertNodes(client, projectId, importId, node.children, id, existingBySourceId, keptIds);
+      await upsertNodes(client, projectId, importId, node.children, id, existingBySourceId, reencodedIds, keptIds);
     }
   }
 }

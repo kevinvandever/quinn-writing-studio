@@ -11,6 +11,7 @@
 
 import archiver from 'archiver';
 import { query } from '../db/connection.js';
+import { decodeCp1252Controls } from '../utils/rtf-parser.js';
 
 // In-memory buffer store for generated exports (keyed by userId)
 const exportBuffers = new Map<string, Buffer>();
@@ -302,7 +303,9 @@ async function addDraftSnapshots(
       '\n---\n',
     ].join('\n');
 
-    archive.append(header + snapshot.content, {
+    // Snapshots from before the RTF decoding fix have control characters
+    // where curly quotes and dashes belong.
+    archive.append(header + decodeCp1252Controls(snapshot.content ?? ''), {
       name: `snapshots/${dateStr}-${snapshot.document_title.replace(/[^a-zA-Z0-9]/g, '-')}-${snapshot.id.slice(0, 8)}.md`,
     });
   }

@@ -9,8 +9,12 @@ import { query } from '../db/connection.js';
 import { requireAuth } from '../middleware/auth.middleware.js';
 import { asyncHandler } from '../middleware/async-handler.js';
 import { AppError, ErrorCodes } from '../middleware/error-handler.middleware.js';
+import { decodeCp1252Controls } from '../utils/rtf-parser.js';
 
 const router = Router();
+
+// Snapshots stored before the RTF decoding fix have control characters where
+// curly quotes and dashes belong; they're decoded as they're read.
 
 // Apply auth middleware to all snapshot routes
 router.use(requireAuth);
@@ -122,11 +126,12 @@ router.get('/snapshots/:id', asyncHandler(async (req: Request, res: Response) =>
     [snapshotId, userId]
   );
 
-  if (result.rows.length === 0) {
+  const snapshot = result.rows[0];
+  if (!snapshot) {
     throw new AppError(404, ErrorCodes.NOT_FOUND, 'Snapshot not found');
   }
 
-  res.json({ snapshot: result.rows[0] });
+  res.json({ snapshot: { ...snapshot, content: decodeCp1252Controls(snapshot.content ?? '') } });
 }));
 
 /**
@@ -187,13 +192,13 @@ router.get('/documents/:id/snapshots/diff', asyncHandler(async (req: Request, re
     diff: {
       snapshotA: {
         id: snapshotA.id,
-        content: snapshotA.content,
+        content: decodeCp1252Controls(snapshotA.content ?? ''),
         wordCount: snapshotA.word_count,
         createdAt: snapshotA.created_at,
       },
       snapshotB: {
         id: snapshotB.id,
-        content: snapshotB.content,
+        content: decodeCp1252Controls(snapshotB.content ?? ''),
         wordCount: snapshotB.word_count,
         createdAt: snapshotB.created_at,
       },

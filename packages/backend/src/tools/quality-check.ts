@@ -11,6 +11,7 @@
  * Usage (from the repo root):
  *   npm run quality-check -w @quinn/backend                  # every case
  *   npm run quality-check -w @quinn/backend -- --case archive-trash --case coach-stuck
+ *   npm run quality-check -w @quinn/backend -- --runs 3      # each case 3 times (1-5), for pass rates
  *   npm run quality-check -w @quinn/backend -- --list        # list the cases
  *   npm run quality-check -w @quinn/backend -- --check       # validate the case file only
  *   add --yes to skip the cost prompt
@@ -56,13 +57,17 @@ function findEvalsDir(): string {
   throw new Error('Could not find evals/quinn-cases.json above the current directory.');
 }
 
-/** Rough cost: the first request writes the cached prompt (~$0.40 on Sonnet); later ones mostly read it. */
-const estimateCost = (cases: QualityCase[]): number =>
-  0.45 + cases.reduce((sum, c) => sum + 0.04 * c.turns.length + (c.rubric.length > 0 ? 0.02 : 0), 0);
+/**
+ * Rough cost, from real runs: writing the cached prompt costs about $0.50
+ * (skipped when a request in the last hour already wrote it); after that,
+ * each turn about $0.02 and each grading about $0.012.
+ */
+const CACHE_WRITE_USD = 0.5;
+const estimateCost = (cases: QualityCase[], runs: number): number =>
+  CACHE_WRITE_USD + runs * cases.reduce((sum, c) => sum + 0.02 * c.turns.length + (c.rubric.length > 0 ? 0.012 : 0), 0);
 
 const money = (n: number): string => `$${n.toFixed(2)}`;
 const seconds = (ms: number): string => (ms >= 60_000 ? `${Math.floor(ms / 60_000)} min ${Math.round((ms % 60_000) / 1000)} s` : `${Math.round(ms / 1000)} s`);
-const STATUS_MARK: Record<CaseResult['status'], string> = { pass: '✓', fail: '✗', skip: '–', error: '!' };
 const STATUS_WORD: Record<CaseResult['status'], string> = { pass: 'pass', fail: 'FAIL', skip: 'skip', error: 'ERROR' };
 
 // ─── API ─────────────────────────────────────────────────────────────────────
@@ -100,26 +105,71 @@ async function runCase(testCase: QualityCase): Promise<CaseResult> {
   throw new Error('Login expired twice in a row.');
 }
 
+
 // ─── Report ──────────────────────────────────────────────────────────────────
+
+/** One run of one case. */
+type RunResult = CaseResult & { attempt: number };
 
 interface Report {
   startedAt: string;
   projectId: string;
   apiUrl: string;
+  runsPerCase: number;
   totalCostUsd: number;
   ms: number;
-  results: CaseResult[];
+  results: RunResult[];
 }
+
+/** A case's runs, summed up. */
+interface CaseSummary {
+  id: string;
+  title: string;
+  runs: RunResult[];
+  /** Runs that produced a verdict (not skipped or broken). */
+  judged: number;
+  passed: number;
+  grade: number | null;
+}
+
+function summarize(results: RunResult[]): CaseSummary[] {
+  const byId = new Map<string, RunResult[]>();
+  for (const r of results) byId.set(r.id, [...(byId.get(r.id) ?? []), r]);
+  return [...byId.values()].map((runs) => {
+    const judged = runs.filter((r) => r.status === 'pass' || r.status === 'fail');
+    const grades = runs.map((r) => r.judge?.score).filter((g): g is number => typeof g === 'number');
+    return {
+      id: runs[0]!.id,
+      title: runs[0]!.title,
+      runs,
+      judged: judged.length,
+      passed: judged.filter((r) => r.status === 'pass').length,
+      grade: grades.length > 0 ? grades.reduce((a, b) => a + b, 0) / grades.length : null,
+    };
+  });
+}
+
+/** ✓ when every run passed, ✗ when none did, ~ in between, – when skipped. */
+function mark(s: CaseSummary): string {
+  if (s.judged === 0) return s.runs.some((r) => r.status === 'error') ? '!' : '–';
+  if (s.passed === s.judged) return '✓';
+  return s.passed === 0 ? '✗' : '~';
+}
+
+const passText = (s: CaseSummary): string => (s.judged === 0 ? '' : `${s.passed}/${s.judged}`);
+const gradeText = (g: number | null): string => (g === null ? '' : Number.isInteger(g) ? `${g}/5` : `${g.toFixed(1)}/5`);
 
 function previousReport(reportsDir: string, before: string): Report | null {
   if (!existsSync(reportsDir)) return null;
-  const files = readdirSync(reportsDir)
+  const last = readdirSync(reportsDir)
     .filter((f) => f.endsWith('.json') && f < before)
-    .sort();
-  const last = files.at(-1);
+    .sort()
+    .at(-1);
   if (!last) return null;
   try {
-    return JSON.parse(readFileSync(join(reportsDir, last), 'utf-8')) as Report;
+    const report = JSON.parse(readFileSync(join(reportsDir, last), 'utf-8')) as Report;
+    report.results = report.results.map((r) => ({ ...r, attempt: r.attempt ?? 1 }));
+    return report;
   } catch {
     return null;
   }
@@ -127,23 +177,26 @@ function previousReport(reportsDir: string, before: string): Report | null {
 
 function comparison(report: Report, previous: Report | null): string[] {
   if (!previous) return [];
-  const before = new Map(previous.results.map((r) => [r.id, r]));
+  const before = new Map(summarize(previous.results).map((s) => [s.id, s]));
   const lines: string[] = [];
-  for (const r of report.results) {
-    const old = before.get(r.id);
+  for (const s of summarize(report.results)) {
+    const old = before.get(s.id);
     if (!old) {
-      lines.push(`- New case: ${r.title} (${STATUS_WORD[r.status]})`);
+      lines.push(`- New case: ${s.title} (passed ${passText(s) || 'no runs'})`);
       continue;
     }
-    if (old.status !== r.status) lines.push(`- ${r.title}: ${STATUS_WORD[old.status]} → ${STATUS_WORD[r.status]}`);
-    else if (old.judge?.score && r.judge?.score && old.judge.score !== r.judge.score) {
-      lines.push(`- ${r.title}: grade ${old.judge.score}/5 → ${r.judge.score}/5`);
+    const rate = (x: CaseSummary): number | null => (x.judged === 0 ? null : x.passed / x.judged);
+    const changes: string[] = [];
+    if (rate(old) !== rate(s)) changes.push(`passed ${passText(old) || 'none'} → ${passText(s) || 'none'}`);
+    if (old.grade !== null && s.grade !== null && Math.abs(old.grade - s.grade) >= 0.5) {
+      changes.push(`grade ${gradeText(old.grade)} → ${gradeText(s.grade)}`);
     }
+    if (changes.length > 0) lines.push(`- ${s.title}: ${changes.join(', ')}`);
   }
-  return lines.length > 0 ? lines : ['- No changes in results or grades.'];
+  return lines.length > 0 ? lines : ['- No changes in pass rates, and no grade moved by half a point or more.'];
 }
 
-/** The first thing that went wrong in a case, for the summary table. */
+/** The first thing that went wrong in a run, for the summary table. */
 function note(r: CaseResult): string {
   if (r.reason) return r.reason;
   const failedCheck = r.results.find((c) => !c.pass && !c.soft);
@@ -155,56 +208,86 @@ function note(r: CaseResult): string {
 }
 
 const cell = (value: string): string => value.replace(/\|/g, '\\|').replace(/\n+/g, ' ');
+const when = (iso: string): string => new Date(iso).toLocaleString('en-US', { dateStyle: 'medium', timeStyle: 'short' });
+
+function renderRun(r: RunResult, lines: string[]): void {
+  if (r.reason) lines.push('', `**${r.reason}**`);
+  for (const t of r.transcript) {
+    lines.push('', t.role === 'writer' ? `**Test message:** ${t.text}` : `**Quinn:**\n\n${t.text}`);
+  }
+  if (r.transcript.length > 0) {
+    const lookups = r.toolCalls.map((c) => `${c.name} ${JSON.stringify(c.input)}${c.isError ? ' (error)' : ''}`);
+    lines.push('', `Lookups: ${lookups.length > 0 ? lookups.join('; ') : 'none'}`);
+  }
+  if (r.results.length > 0) {
+    lines.push('', 'Checks:');
+    for (const c of r.results) lines.push(`- ${c.pass ? '✓' : c.soft ? '⚠' : '✗'} ${c.name} (${c.detail})`);
+  }
+  if (r.judge) {
+    lines.push('', `Grader${r.judge.score ? `, ${r.judge.score}/5` : ''}: ${r.judge.summary}`);
+    for (const c of r.judge.criteria) lines.push(`- ${c.pass ? '✓' : '✗'} ${c.criterion} ${c.reason}`);
+  }
+  const model = r.model ? ` · ${r.model === 'opus' ? 'Opus' : 'Sonnet'}${r.effort ? `, ${r.effort} effort` : ''}` : '';
+  lines.push('', `Cost ${money(r.usage.costUsd)}${model} · ${seconds(r.ms)}`);
+}
 
 function renderMarkdown(report: Report, previous: Report | null, projectLabel: string): string {
-  const started = new Date(report.startedAt);
-  const count = (s: CaseResult['status']): number => report.results.filter((r) => r.status === s).length;
+  const summaries = summarize(report.results);
+  const judged = summaries.filter((s) => s.judged > 0);
+  const allPassing = judged.filter((s) => s.passed === s.judged).length;
+  const runsJudged = judged.reduce((n, s) => n + s.judged, 0);
+  const runsPassed = judged.reduce((n, s) => n + s.passed, 0);
+  const skipped = summaries.filter((s) => s.judged === 0);
+  const perCase = report.runsPerCase > 1 ? `, ${report.runsPerCase} runs each` : '';
   const lines: string[] = [
-    `# Quinn quality check, ${started.toLocaleString('en-US', { dateStyle: 'medium', timeStyle: 'short' })}`,
+    `# Quinn quality check, ${when(report.startedAt)}`,
     '',
-    `Project: ${projectLabel} · ${report.results.length} cases · ${money(report.totalCostUsd)} · ${seconds(report.ms)}`,
+    `Project: ${projectLabel} · ${summaries.length} case${summaries.length === 1 ? '' : 's'}${perCase} · ${money(report.totalCostUsd)} · ${seconds(report.ms)}`,
     '',
-    `**${count('pass')} passed, ${count('fail')} failed${count('skip') ? `, ${count('skip')} skipped` : ''}${count('error') ? `, ${count('error')} could not run` : ''}.**`,
+    report.runsPerCase > 1
+      ? `**${allPassing} of ${judged.length} cases passed every run. ${runsPassed} of ${runsJudged} runs passed.${skipped.length ? ` ${skipped.length} skipped.` : ''}**`
+      : `**${runsPassed} passed, ${runsJudged - runsPassed} failed${skipped.length ? `, ${skipped.length} skipped` : ''}.**`,
     '',
-    'A case passes when every check and every grader criterion passes. Warnings (length, unneeded lookups) don\'t fail a case. Grades are the grader\'s 1-5 score for the coaching overall.',
+    "A run passes when every check and every grader criterion passes. Warnings (length, unneeded lookups) don't fail a run. The grade is the grader's 1-5 score for the coaching overall. Quinn and the grader both vary from run to run, so one failure can be noise; a case that fails most runs points at something real.",
   ];
-  const changes = comparison(report, previous);
-  if (previous) {
-    lines.push('', `Compared with the run of ${new Date(previous.startedAt).toLocaleString('en-US', { dateStyle: 'medium', timeStyle: 'short' })}:`, ...changes);
+  if (previous) lines.push('', `Compared with the run of ${when(previous.startedAt)}:`, ...comparison(report, previous));
+  lines.push('', '| | Case | Passed | Grade | Notes |', '|---|---|---|---|---|');
+  for (const s of summaries) {
+    const firstProblem = s.runs.find((r) => r.status !== 'pass') ?? s.runs[0]!;
+    lines.push(`| ${mark(s)} | ${cell(s.title)} | ${passText(s)} | ${gradeText(s.grade)} | ${cell(note(firstProblem))} |`);
   }
-  lines.push('', '| | Case | Grade | Notes |', '|---|---|---|---|');
-  for (const r of report.results) {
-    lines.push(`| ${STATUS_MARK[r.status]} | ${cell(r.title)} | ${r.judge?.score ? `${r.judge.score}/5` : ''} | ${cell(note(r))} |`);
-  }
-  for (const r of report.results) {
-    lines.push('', '---', '', `## ${STATUS_MARK[r.status]} ${r.title} (\`${r.id}\`)`, '', `What it checks: ${r.checks}`);
-    if (r.reason) lines.push('', `**${r.reason}**`);
-    const filled = Object.entries(r.resolved);
-    if (filled.length > 0) {
-      lines.push('', `Filled in from your files: ${filled.map(([k, v]) => `${k} = "${v}"`).join('; ')}`);
+  for (const s of summaries) {
+    const first = s.runs[0]!;
+    lines.push('', '---', '', `## ${mark(s)} ${s.title} (\`${s.id}\`)`, '', `What it checks: ${first.checks}`);
+    const filled = Object.entries(first.resolved);
+    if (filled.length > 0) lines.push('', `Filled in from your files: ${filled.map(([k, v]) => `${k} = "${v}"`).join('; ')}`);
+    for (const r of s.runs) {
+      if (s.runs.length > 1) lines.push('', `### Run ${r.attempt}: ${STATUS_WORD[r.status]}`);
+      renderRun(r, lines);
     }
-    for (const t of r.transcript) {
-      lines.push('', t.role === 'writer' ? `**Test message:** ${t.text}` : `**Quinn:**\n\n${t.text}`);
-    }
-    if (r.transcript.length > 0) {
-      const lookups = r.toolCalls.map((c) => `${c.name} ${JSON.stringify(c.input)}${c.isError ? ' (error)' : ''}`);
-      lines.push('', `Lookups: ${lookups.length > 0 ? lookups.join('; ') : 'none'}`);
-    }
-    if (r.results.length > 0) {
-      lines.push('', 'Checks:');
-      for (const c of r.results) lines.push(`- ${c.pass ? '✓' : c.soft ? '⚠' : '✗'} ${c.name} (${c.detail})`);
-    }
-    if (r.judge) {
-      lines.push('', `Grader${r.judge.score ? `, ${r.judge.score}/5` : ''}: ${r.judge.summary}`);
-      for (const c of r.judge.criteria) lines.push(`- ${c.pass ? '✓' : '✗'} ${c.criterion} ${c.reason}`);
-    }
-    const model = r.model ? ` · ${r.model === 'opus' ? 'Opus' : 'Sonnet'}${r.effort ? `, ${r.effort} effort` : ''}` : '';
-    lines.push('', `Cost ${money(r.usage.costUsd)}${model} · ${seconds(r.ms)}`);
   }
   return `${lines.join('\n')}\n`;
 }
 
 // ─── Main ────────────────────────────────────────────────────────────────────
+
+const brokenRun = (testCase: QualityCase, attempt: number, err: unknown): RunResult => ({
+  id: testCase.id,
+  title: testCase.title,
+  checks: testCase.checks,
+  status: 'error',
+  reason: err instanceof Error ? err.message : String(err),
+  resolved: {},
+  transcript: [],
+  toolCalls: [],
+  results: [],
+  judge: null,
+  model: null,
+  effort: null,
+  usage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, costUsd: 0 },
+  ms: 0,
+  attempt,
+});
 
 async function main(): Promise<void> {
   const evalsDir = findEvalsDir();
@@ -226,12 +309,20 @@ async function main(): Promise<void> {
   const wanted = values('case');
   const unknown = wanted.filter((id) => !all.some((c) => c.id === id));
   if (unknown.length > 0) throw new Error(`No case with id ${unknown.join(', ')}. Use --list to see them.`);
-  const cases = wanted.length > 0 ? all.filter((c) => wanted.includes(c.id)) : all;
+  // A copy: cases that skip are dropped from it between rounds.
+  const cases = all.filter((c) => wanted.length === 0 || wanted.includes(c.id));
+  const runsArg = values('runs')[0];
+  const runs = runsArg === undefined ? 1 : Number(runsArg);
+  if (!Number.isInteger(runs) || runs < 1 || runs > 5) throw new Error('--runs takes a whole number from 1 to 5.');
 
   if (!API_URL || !EMAIL || !PASSWORD || !PROJECT_ID) {
     throw new Error('Set QUINN_API_URL, QUINN_EMAIL, QUINN_PASSWORD, and SCRIV_PROJECT_ID in packages/backend/.env (or pass --project).');
   }
-  console.log(`${cases.length} case${cases.length === 1 ? '' : 's'} against ${API_URL}, project ${PROJECT_ID}. Estimated cost: about ${money(estimateCost(cases))}.`);
+  const runText = runs > 1 ? `, ${runs} runs each` : '';
+  console.log(
+    `${cases.length} case${cases.length === 1 ? '' : 's'}${runText}, against ${API_URL}, project ${PROJECT_ID}. ` +
+      `Estimated cost: about ${money(estimateCost(cases, runs))} (${money(CACHE_WRITE_USD)} less if a run in the last hour already cached Quinn's prompt).`
+  );
   if (!flag('yes')) {
     const rl = createInterface({ input: process.stdin, output: process.stdout });
     const answer = (await rl.question('Run them? [y/N] ')).trim().toLowerCase();
@@ -240,55 +331,59 @@ async function main(): Promise<void> {
   }
 
   const startedAt = new Date();
-  const results: CaseResult[] = [];
-  for (const [i, testCase] of cases.entries()) {
-    process.stdout.write(`[${i + 1}/${cases.length}] ${testCase.title}… `);
-    let result: CaseResult;
-    try {
-      result = await runCase(testCase);
-    } catch (err) {
-      result = {
-        id: testCase.id,
-        title: testCase.title,
-        checks: testCase.checks,
-        status: 'error',
-        reason: err instanceof Error ? err.message : String(err),
-        resolved: {},
-        transcript: [],
-        toolCalls: [],
-        results: [],
-        judge: null,
-        model: null,
-        effort: null,
-        usage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, costUsd: 0 },
-        ms: 0,
-      };
+  const results: RunResult[] = [];
+  let total = cases.length * runs;
+  let n = 0;
+  // Each round runs every case once, so repeated runs of a case are spread out.
+  for (let attempt = 1; attempt <= runs; attempt++) {
+    for (const testCase of cases) {
+      process.stdout.write(`[${++n}/${total}] ${testCase.title}${runs > 1 ? ` (run ${attempt})` : ''}… `);
+      let result: RunResult;
+      try {
+        result = { ...(await runCase(testCase)), attempt };
+      } catch (err) {
+        result = brokenRun(testCase, attempt, err);
+      }
+      results.push(result);
+      const grade = result.judge?.score ? ` · ${result.judge.score}/5` : '';
+      const why = result.status === 'pass' ? '' : ` · ${note(result)}`;
+      console.log(`${STATUS_WORD[result.status]}${grade} · ${money(result.usage.costUsd)} · ${seconds(result.ms)}${why.slice(0, 160)}`);
+      // A skipped case would skip every time, so its later runs are dropped.
+      if (result.status === 'skip') total -= runs - attempt;
     }
-    results.push(result);
-    const grade = result.judge?.score ? ` · ${result.judge.score}/5` : '';
-    const why = result.status === 'pass' ? '' : ` · ${note(result)}`;
-    console.log(`${STATUS_WORD[result.status]}${grade} · ${money(result.usage.costUsd)} · ${seconds(result.ms)}${why.slice(0, 160)}`);
+    // Drop cases that skipped from later rounds.
+    for (let i = cases.length - 1; i >= 0; i--) {
+      if (results.some((r) => r.id === cases[i]!.id && r.status === 'skip')) cases.splice(i, 1);
+    }
   }
+  results.sort((a, b) => all.findIndex((c) => c.id === a.id) - all.findIndex((c) => c.id === b.id) || a.attempt - b.attempt);
 
   const report: Report = {
     startedAt: startedAt.toISOString(),
     projectId: PROJECT_ID,
     apiUrl: API_URL,
+    runsPerCase: runs,
     totalCostUsd: results.reduce((s, r) => s + r.usage.costUsd, 0),
     ms: Date.now() - startedAt.getTime(),
     results,
   };
   const reportsDir = join(evalsDir, 'reports');
   mkdirSync(reportsDir, { recursive: true });
-  const pad = (n: number): string => String(n).padStart(2, '0');
-  const stamp = `${startedAt.getFullYear()}-${pad(startedAt.getMonth() + 1)}-${pad(startedAt.getDate())}-${pad(startedAt.getHours())}${pad(startedAt.getMinutes())}`;
+  const pad = (v: number): string => String(v).padStart(2, '0');
+  // Down to the second, so two runs in the same minute don't overwrite each other.
+  const stamp = `${startedAt.getFullYear()}-${pad(startedAt.getMonth() + 1)}-${pad(startedAt.getDate())}-${pad(startedAt.getHours())}${pad(startedAt.getMinutes())}${pad(startedAt.getSeconds())}`;
   const previous = previousReport(reportsDir, `${stamp}.json`);
   writeFileSync(join(reportsDir, `${stamp}.json`), JSON.stringify(report, null, 2));
   const projectLabel = results.find((r) => r.projectName)?.projectName ?? PROJECT_ID;
   writeFileSync(join(reportsDir, `${stamp}.md`), renderMarkdown(report, previous, projectLabel));
 
-  const count = (s: CaseResult['status']): number => results.filter((r) => r.status === s).length;
-  console.log(`\n${count('pass')} passed, ${count('fail')} failed, ${count('skip')} skipped, ${count('error')} could not run. Cost ${money(report.totalCostUsd)}, ${seconds(report.ms)}.`);
+  const summaries = summarize(results).filter((s) => s.judged > 0);
+  const runsPassed = summaries.reduce((v, s) => v + s.passed, 0);
+  const runsJudged = summaries.reduce((v, s) => v + s.judged, 0);
+  const allPassing = summaries.filter((s) => s.passed === s.judged).length;
+  console.log(
+    `\n${runsPassed} of ${runsJudged} runs passed${runs > 1 ? `; ${allPassing} of ${summaries.length} cases passed every run` : ''}. Cost ${money(report.totalCostUsd)}, ${seconds(report.ms)}.`
+  );
   for (const line of comparison(report, previous)) console.log(line);
   console.log(`Report: ${resolve(reportsDir, `${stamp}.md`)}`);
 }

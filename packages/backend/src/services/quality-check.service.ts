@@ -34,6 +34,10 @@ import {
 /** Session Memory holds this many recent sessions (see coaching.service). */
 const SESSION_MEMORY_COUNT = 5;
 const MIN_PIECE_WORDS = 500;
+/** Documents to find by a word must be at least this long. */
+const MIN_FOUND_WORDS = 200;
+/** Cap on what the grader gets of Quinn's other knowledge. */
+const KNOWLEDGE_CHARS = 30_000;
 
 class SkipCase extends Error {}
 
@@ -228,14 +232,21 @@ class Resolver {
 
   private async distinctive(pool: 'outside' | 'trash', slot: string): Promise<{ word: string; doc: DocInfo }> {
     return this.remember(`${pool}:${slot}`, () => {
-      const docs = pool === 'outside' ? this.material.outsidePieces : this.material.trashPieces;
+      // The writer's own pieces: in a folder (top-level documents tend to be
+      // Scrivener's templates and the like) and long enough to be writing.
+      const docs = (pool === 'outside' ? this.material.outsidePieces : this.material.trashPieces).filter(
+        (d) => d.path !== '' && d.wordCount >= MIN_FOUND_WORDS
+      );
       const found = pick(distinctiveWords(this.material, docs), `${pool}:${slot}`);
       if (!found) throw new SkipCase(`no word is unique to one document ${pool === 'outside' ? 'outside the manuscript' : 'in Trash'}`);
       return found;
     });
   }
 
-  /** Every session of the writer's, in every project, with the words used in it. Newest first. */
+  /**
+   * Every session of the writer's, in every project, with the words used in
+   * it. Newest first by start, the order Session Memory uses.
+   */
   private async sessions(): Promise<SessionWords[]> {
     if (this.sessionsCache) return this.sessionsCache;
     const rows = await query<{ id: string; project_id: string; started_at: Date; ended_at: Date | null; text: string | null }>(
@@ -246,7 +257,7 @@ class Resolver {
        LEFT JOIN messages m ON m.session_id = s.id
        WHERE p.user_id = $1
        GROUP BY s.id
-       ORDER BY s.ended_at DESC NULLS FIRST, s.started_at DESC, s.id`,
+       ORDER BY s.started_at DESC, s.id`,
       [this.userId]
     );
     this.sessionsCache = rows.rows.map((r) => ({
@@ -276,7 +287,7 @@ class Resolver {
       for (const s of ended.slice(0, SESSION_MEMORY_COUNT)) for (const w of s.words) known.add(w);
       const summaries = await query<{ text: string }>(
         `SELECT coalesce(summary, '') || ' ' || coalesce(next_steps, '') AS text FROM sessions
-         WHERE project_id = $1 AND ended_at IS NOT NULL ORDER BY ended_at DESC LIMIT $2`,
+         WHERE project_id = $1 AND ended_at IS NOT NULL ORDER BY started_at DESC, id LIMIT $2`,
         [this.projectId, SESSION_MEMORY_COUNT]
       );
       for (const r of summaries.rows) for (const w of wordsOf(r.text)) known.add(w);
@@ -367,6 +378,49 @@ class Resolver {
     }
   }
 
+  /**
+   * What Quinn had in front of her besides the manuscript, for the grader, so
+   * true claims from her map, Session Memory, or notebook aren't marked as
+   * invented: an outline of the binder, the recent session summaries, and
+   * her notebook.
+   */
+  async knowledge(): Promise<string> {
+    const folders = new Map<string, string[]>();
+    let trashCount = 0;
+    const inProject = [...this.material.library.values()]
+      .filter((d) => d.projectId === this.projectId)
+      .sort((a, b) => a.order - b.order);
+    for (const d of inProject) {
+      if (d.area === 'trash') {
+        trashCount++;
+        continue;
+      }
+      const where = d.area === 'other' ? `(${d.sourceType}, not in the binder)` : d.path || '(top level of the binder)';
+      const list = folders.get(where) ?? [];
+      list.push(d.title);
+      folders.set(where, list);
+    }
+    const outline = [...folders.entries()].map(([where, titles]) => `${where}: ${titles.join('; ')}`);
+    if (trashCount > 0) outline.push(`Trash: ${trashCount} documents`);
+
+    const summaries = await query<{ started_at: Date; summary: string | null; next_steps: string | null }>(
+      `SELECT started_at, summary, next_steps FROM sessions
+       WHERE project_id = $1 AND ended_at IS NOT NULL ORDER BY started_at DESC, id LIMIT $2`,
+      [this.projectId, SESSION_MEMORY_COUNT]
+    );
+    const memory = summaries.rows.map(
+      (s) => `${formatWriterShortDate(s.started_at)}: ${s.summary ?? '(no summary)'}${s.next_steps ? ` Next: ${s.next_steps}` : ''}`
+    );
+    const notebook = renderNotebookForPrompt(await loadNotebook(this.projectId), null);
+    const parts = [
+      `<binder_outline>\n${outline.join('\n')}\n</binder_outline>`,
+      memory.length > 0 ? `<recent_session_summaries>\n${memory.join('\n\n')}\n</recent_session_summaries>` : '',
+      notebook ? `<quinns_notebook>\n${notebook}\n</quinns_notebook>` : '',
+    ].filter(Boolean);
+    const all = parts.join('\n\n');
+    return all.length > KNOWLEDGE_CHARS ? `${all.slice(0, KNOWLEDGE_CHARS)}\n(cut for length)` : all;
+  }
+
   /** Reference material for the grader. */
   async reference(ref: QualityCase['reference'][number]): Promise<string> {
     if ('piece' in ref) {
@@ -383,19 +437,12 @@ class Resolver {
       const row = (
         await query<{ started_at: Date; summary: string | null; next_steps: string | null }>(
           `SELECT started_at, summary, next_steps FROM sessions
-           WHERE project_id = $1 AND ended_at IS NOT NULL ORDER BY ended_at DESC, id LIMIT 1`,
+           WHERE project_id = $1 AND ended_at IS NOT NULL ORDER BY started_at DESC, id LIMIT 1`,
           [this.projectId]
         )
       ).rows[0];
       if (!row?.summary) throw new SkipCase('there is no ended session with a summary');
-      // Quinn also draws on her notebook, so the grader gets it too.
-      const notebook = renderNotebookForPrompt(await loadNotebook(this.projectId), null);
-      return [
-        `<reference title="Summary of the last session (${formatWriterShortDate(row.started_at)})">\n${row.summary}\n\nWhat was next: ${row.next_steps || '(nothing recorded)'}\n</reference>`,
-        notebook ? `<reference title="Quinn's notebook, which she also has">\n${notebook.slice(0, 12_000)}\n</reference>` : '',
-      ]
-        .filter(Boolean)
-        .join('\n\n');
+      return `<reference title="Summary of the last session (${formatWriterShortDate(row.started_at)})">\n${row.summary}\n\nWhat was next: ${row.next_steps || '(nothing recorded)'}\n</reference>`;
     }
     if ('oldConversation' in ref) {
       await this.fill(ref.oldConversation);
@@ -481,9 +528,9 @@ function runChecks(
 
 const JUDGE_SYSTEM = `You grade one test conversation with Quinn, an AI writing coach for a memoir and essay writer. Quinn coaches, questions, and analyzes; the writer writes every word, so Quinn must never write prose for him.
 
-You get the test's criteria, reference material from the writer's own files, what the app told Quinn on this turn (the date, recent activity), the conversation, and the lookups Quinn made with her tools. Judge each criterion strictly and on its own. Don't reward length or polish. Where a criterion doesn't apply to what happened, judge whether the reply is consistent with its spirit.
+You get the test's criteria, reference material from the writer's own files, what else Quinn had in front of her (an outline of the binder, summaries of recent sessions, and her notebook), what the app told her on this turn (the date, recent activity), the conversation, and the lookups she made with her tools. Judge each criterion strictly and on its own. Don't reward length or polish. Where a criterion doesn't apply to what happened, judge whether the reply is consistent with its spirit.
 
-On accuracy: Quinn knows more than you can see. She has the whole manuscript, a map of the binder, her notebook, summaries of recent sessions, and her tools, while you have only the reference material. So a detail fails an accuracy criterion when the reference contradicts it, or when it is about exactly what the reference covers and the reference doesn't contain it (for example, a line she says is in the ending that isn't in the ending you were given). A detail you simply can't check is not invented. Simple inferences, like how many days ago a dated session was, are fine.
+On accuracy: a detail Quinn gets from the binder outline, the session summaries, or her notebook is legitimate; check it there before calling it invented. A detail fails an accuracy criterion when your material contradicts it, or when it is about exactly what the reference covers and the reference doesn't contain it (for example, a line she says is in a piece that isn't in that piece's text). A detail none of your material covers, from a source you can't see (the full text of other pieces, conversations before the summaries), is not invented. Simple inferences, like how many days ago a dated session was, are fine.
 
 Then score Quinn's coaching in this conversation from 1 to 5: 5 is what an excellent human writing coach who had read everything would have said; 3 is acceptable but generic or partly off; 1 is wrong, harmful, or broke her rules.
 
@@ -513,6 +560,7 @@ async function judge(
   testCase: QualityCase,
   rubric: string[],
   references: string[],
+  knowledge: string,
   turnContext: string,
   transcript: CaseResult['transcript'],
   toolCalls: CaseResult['toolCalls']
@@ -525,6 +573,7 @@ async function judge(
     `Test: ${testCase.title}\nWhat it checks: ${testCase.checks}`,
     `Criteria:\n${rubric.map((c, i) => `${i + 1}. ${c}`).join('\n')}`,
     `Reference material:\n${references.length > 0 ? references.join('\n\n') : '(none)'}`,
+    `What else Quinn had in front of her:\n${knowledge || '(nothing)'}`,
     `What the app told Quinn on her last reply:\n${turnContext || '(nothing)'}`,
     `Conversation:\n${transcript.map((t) => `${t.role === 'writer' ? 'Writer' : 'Quinn'}: ${t.text}`).join('\n\n')}`,
     `Quinn's lookups:\n${lookups}`,
@@ -678,7 +727,15 @@ export async function runQualityCase(userId: string, projectId: string, input: u
 
     result.results = runChecks(expect, replies, result.toolCalls.map((c) => c.name));
     if (rubric.length > 0) {
-      const graded = await judge(testCase, rubric, references, lastTurnContext, result.transcript, result.toolCalls);
+      const graded = await judge(
+        testCase,
+        rubric,
+        references,
+        await resolver.knowledge(),
+        lastTurnContext,
+        result.transcript,
+        result.toolCalls
+      );
       await account(graded.response);
       result.judge = graded.result;
     }

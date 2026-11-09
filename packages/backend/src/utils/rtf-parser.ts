@@ -60,9 +60,12 @@ export function stripRtf(rtfContent: string): string {
   text = text.replace(/\\rdblquote\b/g, '\u201D');
   text = text.replace(/\\tab\b/g, '\t');
 
-  // Hex-encoded characters: \'XX
+  // Hex-encoded characters: \'XX, in Windows-1252 (Scrivener writes
+  // \ansicpg1252). Read as Latin-1, 0x80-0x9F would be control characters
+  // instead of curly quotes, apostrophes, and dashes.
   text = text.replace(/\\'([0-9a-fA-F]{2})/g, (_match, hex) => {
-    return String.fromCharCode(parseInt(hex, 16));
+    const byte = parseInt(hex, 16);
+    return byte >= 0x80 && byte <= 0x9f ? (CP1252_CONTROLS[byte] ?? '') : String.fromCharCode(byte);
   });
 
   // Paragraph and line breaks

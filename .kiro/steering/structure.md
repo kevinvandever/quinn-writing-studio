@@ -32,6 +32,7 @@ quinn-writing-studio/
 │   │   │   │   ├── scrivener-sync.service.ts    # Applies a parsed binder in place, keyed by Scrivener UUID (keeps summaries, earmarks, snapshots)
 │   │   │   │   ├── manuscript-context.service.ts # Full text of the book (Draft folder + front/back matter) for the cached prompt
 │   │   │   │   ├── notebook.service.ts          # Quinn's notebook: long-term notes per project, revised after each session
+│   │   │   │   ├── archive-tools.service.ts     # Tools Quinn calls mid-reply: search/read writing, search conversations, piece history
 │   │   │   │   ├── substack-sync.service.ts     # RSS/API sync
 │   │   │   │   ├── theme-analysis.service.ts    # Cross-project themes
 │   │   │   │   ├── intelligence.service.ts      # Grant/news/publishing pipeline

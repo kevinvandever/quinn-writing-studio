@@ -57,6 +57,16 @@ export function comparableText(text: string): string {
   return splitParagraphs(text).join('\n');
 }
 
+/** The text cleaned of extraction debris, with a blank line between paragraphs. */
+export function cleanForReading(text: string): string {
+  return splitParagraphs(text).join('\n\n');
+}
+
+/** A short passage (e.g. a search snippet) cleaned of extraction debris, on one line. */
+export function cleanPassage(text: string): string {
+  return splitParagraphs(text).join(' ');
+}
+
 export function countWords(text: string): number {
   const trimmed = text.trim();
   return trimmed ? trimmed.split(/\s+/).length : 0;

@@ -281,12 +281,14 @@ async function loadVersions(documentId: string): Promise<Version[]> {
 }
 
 /**
- * Context for the /revisions mode: a piece's versions over time, its earliest
- * version in full, and what changed in its latest revisions.
+ * A piece's versions over time and what changed in its latest revisions, plus
+ * (by default) its earliest version in full. Used by the /revisions mode and
+ * by Quinn's piece_history tool.
  */
 export async function buildRevisionHistoryContext(
   projectId: string,
-  pieceTitle: string | null
+  pieceTitle: string | null,
+  options: { includeEarliest: boolean } = { includeEarliest: true }
 ): Promise<string> {
   if (!pieceTitle) {
     return "## Revision History\nThe writer didn't name a piece. Ask which piece they mean.";
@@ -329,7 +331,7 @@ export async function buildRevisionHistoryContext(
 
   const lines: string[] = [
     header,
-    `${where} ${stored.length} earlier version${stored.length === 1 ? ' is' : 's are'} stored, from ${formatDay(stored[0]!.at!)} on. A Scrivener snapshot is a version saved in Scrivener; "Pre-Sync External File Version" snapshots are ones Scrivener took automatically before syncing with an external folder. The current text is in The Manuscript section, or in the retrieved material if the piece lives outside the book.`.trim(),
+    `${where} ${stored.length} earlier version${stored.length === 1 ? ' is' : 's are'} stored, from ${formatDay(stored[0]!.at!)} on. A Scrivener snapshot is a version saved in Scrivener; "Pre-Sync External File Version" snapshots are ones Scrivener took automatically before syncing with an external folder. The current text is in The Manuscript section if the piece is in the book; otherwise it's in the retrieved material, or read it with read_document.`.trim(),
     '',
     'Versions, oldest first:',
   ];
@@ -347,12 +349,16 @@ export async function buildRevisionHistoryContext(
   }
 
   const first = steps[0]!;
-  const firstClean = comparableText(first.content);
-  const firstText =
-    firstClean.length > FIRST_VERSION_CHARS
-      ? `${firstClean.slice(0, FIRST_VERSION_CHARS)}\n(The rest of this version, ${formatNumber(firstClean.length - FIRST_VERSION_CHARS)} characters, is left out.)`
-      : firstClean;
-  lines.push('', `The earliest stored version (${day(first)}), in full:`, '<earliest_version>', firstText.trim(), '</earliest_version>');
+  if (options.includeEarliest) {
+    const firstClean = comparableText(first.content);
+    const firstText =
+      firstClean.length > FIRST_VERSION_CHARS
+        ? `${firstClean.slice(0, FIRST_VERSION_CHARS)}\n(The rest of this version, ${formatNumber(firstClean.length - FIRST_VERSION_CHARS)} characters, is left out.)`
+        : firstClean;
+    lines.push('', `The earliest stored version (${day(first)}), in full:`, '<earliest_version>', firstText.trim(), '</earliest_version>');
+  } else {
+    lines.push('', `(The earliest version, from ${day(first)}, isn't included here. Ask for it with include_earliest_text if you need its full text.)`);
+  }
 
   const recent: string[] = [];
   for (let i = steps.length - 1; i > 0 && recent.length < RECENT_STEPS; i--) {

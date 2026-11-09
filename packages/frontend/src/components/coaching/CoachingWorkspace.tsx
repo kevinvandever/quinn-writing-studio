@@ -82,6 +82,8 @@ export function CoachingWorkspace() {
   const [inputValue, setInputValue] = useState('');
   const [isStreaming, setIsStreaming] = useState(false);
   const [streamingContent, setStreamingContent] = useState('');
+  // What Quinn is looking up mid-reply (searching her notes, reading a piece).
+  const [activity, setActivity] = useState<string | null>(null);
   const [modelInfo, setModelInfo] = useState<ModelInfo | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -146,6 +148,7 @@ export function CoachingWorkspace() {
     (targetSession: Session, content: string, isRetry = false) => {
       setIsStreaming(true);
       setStreamingContent('');
+      setActivity(null);
       setModelInfo(null);
       setError(null);
 
@@ -174,6 +177,10 @@ export function CoachingWorkspace() {
         .onToken((token) => {
           fullContent += token;
           setStreamingContent(fullContent);
+          setActivity(null);
+        })
+        .onActivity((event) => {
+          setActivity(event.label);
         })
         .onModelInfo((info) => {
           streamedModel = info;
@@ -194,6 +201,7 @@ export function CoachingWorkspace() {
           };
           setMessages((prev) => [...prev, assistantMessage]);
           setStreamingContent('');
+          setActivity(null);
           setIsStreaming(false);
           setModelInfo(null);
         })
@@ -205,6 +213,7 @@ export function CoachingWorkspace() {
           setError(err.message);
           setIsStreaming(false);
           setStreamingContent('');
+          setActivity(null);
         });
 
       abortRef.current = () => stream.abort();
@@ -427,6 +436,13 @@ export function CoachingWorkspace() {
           />
         )}
 
+        {/* What Quinn is looking up, when she does it after starting her reply */}
+        {isStreaming && streamingContent && activity && (
+          <p className="ml-12 -mt-2 text-sm italic text-warm-500" aria-live="polite">
+            {activity}…
+          </p>
+        )}
+
         {/* Loading indicator while waiting for first token */}
         {isStreaming && !streamingContent && (
           <div className="flex items-start gap-3">
@@ -438,6 +454,11 @@ export function CoachingWorkspace() {
                 <div className="w-2 h-2 bg-sage-400 rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
                 <div className="w-2 h-2 bg-sage-400 rounded-full animate-bounce" style={{ animationDelay: '150ms' }} />
                 <div className="w-2 h-2 bg-sage-400 rounded-full animate-bounce" style={{ animationDelay: '300ms' }} />
+                {activity && (
+                  <span className="ml-2 text-sm italic text-warm-600" aria-live="polite">
+                    {activity}…
+                  </span>
+                )}
               </div>
             </div>
           </div>

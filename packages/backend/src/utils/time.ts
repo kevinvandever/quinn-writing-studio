@@ -18,6 +18,16 @@ export function formatWriterDate(date: Date): string {
   });
 }
 
+/** e.g. "Oct 30, 2026" */
+export function formatWriterShortDate(date: Date): string {
+  return date.toLocaleDateString('en-US', {
+    timeZone: config.WRITER_TIME_ZONE,
+    month: 'short',
+    day: 'numeric',
+    year: 'numeric',
+  });
+}
+
 /** e.g. "9:05 PM EDT" */
 export function formatWriterTime(date: Date): string {
   return date.toLocaleTimeString('en-US', {

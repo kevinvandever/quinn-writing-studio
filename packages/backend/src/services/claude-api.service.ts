@@ -218,9 +218,53 @@ export async function sendMessage(
   }
 }
 
+/** A tool call the model made, for the caller's tool runner. */
+export interface StreamToolCall {
+  id: string;
+  name: string;
+  input: unknown;
+}
+
+/** Tools for a streamed reply, and how to run them. */
+export interface StreamTools {
+  /** Sent with every request; part of the cached prefix, so keep them stable. */
+  definitions: Anthropic.Messages.Tool[];
+  /**
+   * Run one call. `announce` shows the writer what Quinn is doing. Throwing is
+   * fine: the error goes back to the model as a failed tool result.
+   */
+  run: (
+    call: StreamToolCall,
+    announce: (label: string) => void
+  ) => Promise<{ content: string; isError?: boolean }>;
+}
+
+/** Rounds of tool calls with real results in one reply. */
+const MAX_TOOL_ROUNDS = 6;
+/** Characters of tool results in one reply, after which lookups stop. */
+const MAX_TOOL_RESULT_CHARS = 160_000;
+const TOOL_LIMIT_MESSAGE =
+  "That's as much looking up as one reply allows. Answer with what you have, and tell the writer you can look further if they'd like.";
+
+/** Raised inside the stream when the caller aborted it. */
+class StreamAbortedError extends Error {
+  constructor() {
+    super('Stream aborted');
+    this.name = 'StreamAbortedError';
+  }
+}
+
 /**
  * Pipe Anthropic stream events to an Express Response as Server-Sent Events.
- * Sends events: 'token', 'model_info', 'retrying', 'done', 'error'.
+ * Sends events: 'model_info', 'token', 'activity' (what Quinn is looking up),
+ * 'retrying', 'done', 'error'.
+ *
+ * With `tools`, a reply can take several requests: when the model calls
+ * tools, they're run, their results are sent back with the model's own turn
+ * echoed exactly as received (thinking blocks included, as the API requires),
+ * and the model continues. Text from every request streams to the writer as
+ * one reply. Each request is retried on transient errors until it has
+ * streamed text.
  *
  * Resolves with empty content (after sending an 'error' event) when the model
  * produced no text, e.g. thinking used the whole output budget or the model
@@ -235,9 +279,10 @@ export function streamToSSE(
     model: ModelSelection;
     modelReason: string;
     effort: Effort;
+    tools?: StreamTools;
   }
 ): { promise: Promise<ClaudeResponse>; abort: () => void } {
-  const { systemPrompt, messages, model, modelReason, effort } = options;
+  const { systemPrompt, messages, model, modelReason, effort, tools } = options;
   const modelId = MODEL_MAP[model];
 
   // Set SSE headers
@@ -247,18 +292,20 @@ export function streamToSSE(
   res.setHeader('X-Accel-Buffering', 'no');
   res.flushHeaders();
 
-  // Send model info event
-  res.write(
-    `event: model_info\ndata: ${JSON.stringify({ model, reason: modelReason })}\n\n`
-  );
-
   let aborted = false;
   let finished = false;
   let currentStream: ReturnType<typeof anthropic.messages.stream> | null = null;
 
-  // The model can think for a while before its first token. An SSE comment
-  // every 15s keeps proxies from treating the quiet connection as idle; the
-  // client ignores comment lines.
+  function send(event: string, data: unknown): void {
+    if (finished || res.writableEnded) return;
+    res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+  }
+
+  send('model_info', { model, reason: modelReason });
+
+  // The model can think for a while before its first token, and tool lookups
+  // add pauses. An SSE comment every 15s keeps proxies from treating the quiet
+  // connection as idle; the client ignores comment lines.
   const keepAlive = setInterval(() => {
     if (!finished && !res.writableEnded) res.write(': keepalive\n\n');
   }, 15000);
@@ -266,14 +313,11 @@ export function streamToSSE(
 
   /** Write an optional final event and end the response, exactly once. */
   function finish(event?: { name: 'done' | 'error'; data: unknown }): void {
+    if (event) send(event.name, event.data);
     if (finished) return;
     finished = true;
     clearInterval(keepAlive);
-    if (res.writableEnded) return;
-    if (event) {
-      res.write(`event: ${event.name}\ndata: ${JSON.stringify(event.data)}\n\n`);
-    }
-    res.end();
+    if (!res.writableEnded) res.end();
   }
 
   /**
@@ -295,117 +339,191 @@ export function streamToSSE(
 
   const MAX_RETRIES = 4;
 
-  const promise = new Promise<ClaudeResponse>((resolve, reject) => {
-    let fullContent = '';
-
-    /**
-     * Attempt the stream. If it fails before any text is emitted with a
-     * retryable error, wait with exponential backoff and try again.
-     */
-    async function attempt(retryCount: number): Promise<void> {
-      if (aborted || finished) return;
-
-      let streamedAnyText = false;
-      // The SDK emits 'end' right after 'error'. This flag tells the 'end'
-      // handler that the error handler already decided this attempt's outcome
-      // (retry or fail), so it must not report anything itself.
-      let failed = false;
-      const stream = anthropic.messages.stream({
-        model: modelId,
-        max_tokens: COACHING_MAX_TOKENS,
-        output_config: { effort },
-        system: systemPrompt,
-        messages,
-      });
-      currentStream = stream;
-
-      stream.on('text', (text) => {
-        if (aborted || finished) return;
-        streamedAnyText = true;
-        fullContent += text;
-        res.write(`event: token\ndata: ${JSON.stringify({ token: text })}\n\n`);
-      });
-
-      stream.on('error', (error) => {
-        failed = true;
-        if (aborted || finished) return;
-
-        // If we can still retry and nothing has been streamed yet, back off and retry
-        if (!streamedAnyText && retryCount < MAX_RETRIES && isRetryableError(error)) {
-          const delayMs = Math.min(1000 * Math.pow(2, retryCount), 8000);
-          console.warn(
-            `[Claude] Transient error (${(error as Error).message}). Retry ${retryCount + 1}/${MAX_RETRIES} in ${delayMs}ms`
-          );
-          // Let the client know we're retrying so the UI can show a status
-          res.write(
-            `event: retrying\ndata: ${JSON.stringify({ attempt: retryCount + 1, delayMs })}\n\n`
-          );
-          setTimeout(() => {
-            void attempt(retryCount + 1);
-          }, delayMs);
+  /**
+   * One request, streamed. Retries with exponential backoff on a transient
+   * error, as long as this request hasn't streamed any text yet.
+   */
+  function requestOnce(
+    conversation: Anthropic.Messages.MessageParam[],
+    onText: (text: string) => void
+  ): Promise<Anthropic.Messages.Message> {
+    return new Promise((resolve, reject) => {
+      const attempt = (retryCount: number): void => {
+        if (aborted || finished) {
+          reject(new StreamAbortedError());
           return;
         }
+        let streamedAnyText = false;
+        // The SDK emits 'end' right after 'error'. This flag tells the 'end'
+        // handler that the error handler already decided this attempt's
+        // outcome (retry or fail), so it must not report anything itself.
+        let failed = false;
+        const stream = anthropic.messages.stream({
+          model: modelId,
+          max_tokens: COACHING_MAX_TOKENS,
+          output_config: { effort },
+          system: systemPrompt,
+          messages: conversation,
+          ...(tools ? { tools: tools.definitions } : {}),
+        });
+        currentStream = stream;
 
-        // Out of retries or already streaming — surface the error
-        const friendlyMessage = isRetryableError(error)
-          ? 'Quinn is experiencing high demand right now. Please try again in a moment.'
-          : (error as Error).message;
-        finish({ name: 'error', data: { message: friendlyMessage } });
-        reject(error);
-      });
+        stream.on('text', (text) => {
+          if (aborted || finished) return;
+          streamedAnyText = true;
+          onText(text);
+        });
 
-      stream.on('end', () => {
-        if (failed || aborted || finished) return;
-        // Wait for finalMessage to get token counts
-        stream
-          .finalMessage()
-          .then((finalMessage) => {
-            if (aborted || finished) return;
+        stream.on('error', (error) => {
+          failed = true;
+          if (aborted || finished) {
+            reject(new StreamAbortedError());
+            return;
+          }
+          if (!streamedAnyText && retryCount < MAX_RETRIES && isRetryableError(error)) {
+            const delayMs = Math.min(1000 * Math.pow(2, retryCount), 8000);
+            console.warn(
+              `[Claude] Transient error (${(error as Error).message}). Retry ${retryCount + 1}/${MAX_RETRIES} in ${delayMs}ms`
+            );
+            // Let the client know we're retrying so the UI can show a status
+            send('retrying', { attempt: retryCount + 1, delayMs });
+            setTimeout(() => attempt(retryCount + 1), delayMs);
+            return;
+          }
+          reject(error);
+        });
 
-            const response: ClaudeResponse = {
-              content: fullContent,
-              model,
-              reason: modelReason,
-              inputTokens: finalMessage.usage.input_tokens,
-              outputTokens: finalMessage.usage.output_tokens,
-              cache: cacheUsageFrom(finalMessage.usage),
-            };
+        stream.on('end', () => {
+          if (failed) return;
+          if (aborted || finished) {
+            reject(new StreamAbortedError());
+            return;
+          }
+          stream.finalMessage().then(resolve, reject);
+        });
+      };
+      attempt(0);
+    });
+  }
 
-            if (finalMessage.stop_reason === 'max_tokens') {
-              console.warn(
-                `[Claude] ${modelId} hit max_tokens (${COACHING_MAX_TOKENS}) at effort ${effort}`
+  const promise = (async (): Promise<ClaudeResponse> => {
+    const conversation: Anthropic.Messages.MessageParam[] = [...messages];
+    let fullContent = '';
+    // Text after a tool round starts a new paragraph of the same reply.
+    let startsNewParagraph = false;
+    const onText = (text: string): void => {
+      if (startsNewParagraph) {
+        startsNewParagraph = false;
+        if (fullContent && !/\s$/.test(fullContent) && !/^\s/.test(text)) {
+          fullContent += '\n\n';
+          send('token', { token: '\n\n' });
+        }
+      }
+      fullContent += text;
+      send('token', { token: text });
+    };
+
+    let inputTokens = 0;
+    let outputTokens = 0;
+    const cache: CacheUsage = { readTokens: 0, write5mTokens: 0, write1hTokens: 0 };
+    let toolRounds = 0;
+    let toolResultChars = 0;
+    let finalMessage: Anthropic.Messages.Message;
+
+    try {
+      for (;;) {
+        finalMessage = await requestOnce(conversation, onText);
+        inputTokens += finalMessage.usage.input_tokens;
+        outputTokens += finalMessage.usage.output_tokens;
+        const used = cacheUsageFrom(finalMessage.usage);
+        cache.readTokens += used.readTokens;
+        cache.write5mTokens += used.write5mTokens;
+        cache.write1hTokens += used.write1hTokens;
+
+        const calls = finalMessage.content.filter(
+          (block): block is Anthropic.Messages.ToolUseBlock => block.type === 'tool_use'
+        );
+        if (!tools || finalMessage.stop_reason !== 'tool_use' || calls.length === 0) break;
+        if (toolRounds > MAX_TOOL_ROUNDS) {
+          console.warn(`[Claude] ${modelId} kept calling tools past the limit; ending the reply`);
+          break;
+        }
+        toolRounds++;
+
+        // Echo the model's turn exactly as received, then answer every call.
+        conversation.push({
+          role: 'assistant',
+          content: finalMessage.content as Anthropic.Messages.ContentBlockParam[],
+        });
+        const results: Anthropic.Messages.ToolResultBlockParam[] = [];
+        for (const call of calls) {
+          let outcome: { content: string; isError?: boolean };
+          if (toolRounds > MAX_TOOL_ROUNDS || toolResultChars >= MAX_TOOL_RESULT_CHARS) {
+            outcome = { content: TOOL_LIMIT_MESSAGE };
+          } else {
+            try {
+              outcome = await tools.run({ id: call.id, name: call.name, input: call.input }, (label) =>
+                send('activity', { label })
               );
+            } catch (err) {
+              console.warn(`[Claude] Tool ${call.name} failed:`, err instanceof Error ? err.message : err);
+              outcome = { content: 'The lookup failed on the app side. Carry on without it.', isError: true };
             }
-
-            if (!fullContent.trim()) {
-              console.warn(
-                `[Claude] ${modelId} returned no text (stop_reason: ${finalMessage.stop_reason}, output tokens: ${response.outputTokens})`
-              );
-              const message =
-                finalMessage.stop_reason === 'refusal'
-                  ? "Quinn couldn't respond to that one. Try rephrasing it."
-                  : "Quinn didn't finish a reply that time. Please try again.";
-              finish({ name: 'error', data: { message } });
-              resolve(response);
-              return;
-            }
-
-            finish({
-              name: 'done',
-              data: { inputTokens: totalInputTokens(response), outputTokens: response.outputTokens },
-            });
-            resolve(response);
-          })
-          .catch((err) => {
-            if (aborted || finished) return;
-            finish({ name: 'error', data: { message: (err as Error).message } });
-            reject(err);
+          }
+          toolResultChars += outcome.content.length;
+          results.push({
+            type: 'tool_result',
+            tool_use_id: call.id,
+            content: outcome.content,
+            ...(outcome.isError ? { is_error: true } : {}),
           });
-      });
+        }
+        conversation.push({ role: 'user', content: results });
+        startsNewParagraph = true;
+      }
+    } catch (error) {
+      if (error instanceof StreamAbortedError) throw error;
+      const friendlyMessage = isRetryableError(error)
+        ? 'Quinn is experiencing high demand right now. Please try again in a moment.'
+        : (error as Error).message;
+      finish({ name: 'error', data: { message: friendlyMessage } });
+      throw error;
     }
 
-    void attempt(0);
-  });
+    const response: ClaudeResponse = {
+      content: fullContent,
+      model,
+      reason: modelReason,
+      inputTokens,
+      outputTokens,
+      cache,
+    };
+
+    if (finalMessage.stop_reason === 'max_tokens') {
+      console.warn(`[Claude] ${modelId} hit max_tokens (${COACHING_MAX_TOKENS}) at effort ${effort}`);
+    }
+    if (toolRounds > 0) {
+      console.log(`[Claude] Reply used ${toolRounds} tool round(s), ${toolResultChars} characters of results`);
+    }
+
+    if (!fullContent.trim()) {
+      console.warn(
+        `[Claude] ${modelId} returned no text (stop_reason: ${finalMessage.stop_reason}, output tokens: ${outputTokens})`
+      );
+      const message =
+        finalMessage.stop_reason === 'refusal'
+          ? "Quinn couldn't respond to that one. Try rephrasing it."
+          : "Quinn didn't finish a reply that time. Please try again.";
+      finish({ name: 'error', data: { message } });
+      return response;
+    }
+
+    finish({
+      name: 'done',
+      data: { inputTokens: totalInputTokens(response), outputTokens: response.outputTokens },
+    });
+    return response;
+  })();
 
   const abort = () => {
     aborted = true;
@@ -415,6 +533,7 @@ export function streamToSSE(
 
   return { promise, abort };
 }
+
 
 
 // ─── Smart Model Routing ─────────────────────────────────────────────────────
@@ -543,6 +662,8 @@ export interface AssemblePromptOptions {
   projectContext: ProjectContext;
   taskInstructions: string;
   ethicsPrompt: string;
+  /** How to use the archive tools, when the request offers them. */
+  toolsGuide: string | null;
   /** Full text of the book (Scrivener's Draft folder), when the project has one. */
   manuscriptText: string | null;
   /** Full text of material outside the book, for whole-corpus modes. */
@@ -604,8 +725,9 @@ export function assemblePrompt(options: AssemblePromptOptions): AssembledPrompt 
     buildPersonaSection(options.personaConfig),
     `## Ethics Enforcement\n${options.ethicsPrompt}`,
     `## Current Task Instructions\n${options.taskInstructions}`,
-    buildProjectSection(options.projectContext),
   ];
+  if (options.toolsGuide) stable.push(options.toolsGuide);
+  stable.push(buildProjectSection(options.projectContext));
   if (options.manuscriptText) stable.push(options.manuscriptText);
   if (options.outsideText) stable.push(options.outsideText);
   if (options.corpusOverview.length > 0) {
@@ -794,7 +916,7 @@ function buildProjectSection(project: ProjectContext): string {
 function buildSessionHistorySection(sessions: SessionSummary[]): string {
   const lines: string[] = ['## Session Memory'];
   lines.push(
-    "These are your notes from previous sessions with this writer, most recent first. They're what you remember: you have these notes, not the full conversations, so if the writer asks about a detail that isn't here, say you don't have it rather than guessing. When starting a new session, naturally acknowledge where you left off — reference specific topics, decisions, or unresolved threads. Do not recite the summaries verbatim; weave them into conversation as a coach who remembers would."
+    "These are your notes from previous sessions with this writer, most recent first. They're summaries, not the full conversations: if the writer asks about a detail that isn't here, look for it with search_conversations, and if it isn't there either, say you don't have it rather than guessing. When starting a new session, naturally acknowledge where you left off — reference specific topics, decisions, or unresolved threads. Do not recite the summaries verbatim; weave them into conversation as a coach who remembers would."
   );
 
   for (const session of sessions) {
@@ -816,8 +938,8 @@ function buildRetrievedSection(
   hasManuscript: boolean
 ): string {
   const header = hasManuscript
-    ? "## Retrieved Material (outside the manuscript)\nPieces from elsewhere in the binder that match this message. They aren't part of the book.\n\n"
-    : '## Relevant Corpus Context\n';
+    ? "## Retrieved Material (outside the manuscript)\nFull text of pieces from elsewhere in the binder that the writer named, or that this mode is about. They aren't part of the book.\n\n"
+    : '## Retrieved Material\nFull text of pieces the writer named, or that this mode is about.\n\n';
   let content = '';
   let remaining = budget - header.length;
 

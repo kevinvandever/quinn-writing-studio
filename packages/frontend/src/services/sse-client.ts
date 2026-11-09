@@ -17,6 +17,11 @@ export interface RetryingEvent {
   delayMs: number;
 }
 
+/** What Quinn is looking up, e.g. "Searching your writing for “boat”". */
+export interface ActivityEvent {
+  label: string;
+}
+
 /** The server answered with an HTTP error before streaming began. */
 export class SSEHttpError extends Error {
   constructor(public status: number, message: string) {
@@ -41,6 +46,8 @@ export interface SSEStream {
   onDone: (callback: (event: DoneEvent) => void) => SSEStream;
   /** Called when the server is retrying after a transient error */
   onRetrying: (callback: (event: RetryingEvent) => void) => SSEStream;
+  /** Called when Quinn starts looking something up */
+  onActivity: (callback: (event: ActivityEvent) => void) => SSEStream;
   /** Called on error */
   onError: (callback: (error: Error) => void) => SSEStream;
   /** Abort the stream */
@@ -56,6 +63,7 @@ export interface SSEStream {
  * Handles SSE events:
  * - 'token': streaming text chunks
  * - 'model_info': model selection notification
+ * - 'activity': what Quinn is looking up (searching, reading)
  * - 'done': stream complete with token usage
  * - 'error': error from the server
  */
@@ -69,6 +77,7 @@ export function createSSEStream(
   let modelInfoCallback: ((info: ModelInfo) => void) | null = null;
   let doneCallback: ((event: DoneEvent) => void) | null = null;
   let retryingCallback: ((event: RetryingEvent) => void) | null = null;
+  let activityCallback: ((event: ActivityEvent) => void) | null = null;
   let errorCallback: ((error: Error) => void) | null = null;
 
   const abortController = new AbortController();
@@ -192,6 +201,12 @@ export function createSSEStream(
           }
           break;
 
+        case 'activity':
+          if (activityCallback && typeof parsed['label'] === 'string') {
+            activityCallback({ label: parsed['label'] });
+          }
+          break;
+
         case 'error':
           if (errorCallback) {
             const msg =
@@ -222,6 +237,10 @@ export function createSSEStream(
     },
     onRetrying(callback) {
       retryingCallback = callback;
+      return stream;
+    },
+    onActivity(callback) {
+      activityCallback = callback;
       return stream;
     },
     onError(callback) {

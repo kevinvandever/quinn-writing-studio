@@ -19,6 +19,12 @@ import {
 } from './claude-api.service.js';
 import { loadManuscriptContext } from './manuscript-context.service.js';
 import {
+  ARCHIVE_TOOLS,
+  ARCHIVE_TOOLS_GUIDE,
+  runArchiveTool,
+  type ArchiveToolContext,
+} from './archive-tools.service.js';
+import {
   loadManuscriptChanges,
   buildRevisionHistoryContext,
   type ChangesBudget,
@@ -577,8 +583,11 @@ export async function sendSessionMessage(
   const omittedCount = historyStart;
   const conversationNote =
     omittedCount > 0
-      ? `This session is long, so its first ${omittedCount} message${omittedCount === 1 ? '' : 's'} aren't included below. You don't have their text, so don't claim to remember them. If the writer refers to something from earlier in the session that you can't see, ask them to remind you.`
+      ? `This session is long, so its first ${omittedCount} message${omittedCount === 1 ? '' : 's'} aren't included below. You don't have their text, so don't claim to remember them. If the writer refers to something from earlier in the session that you can't see, look for it with search_conversations, or ask them to remind you.`
       : null;
+  // Conversation search skips what this request already shows: this session
+  // from the first message in the window on.
+  const visibleSince = allMessages[historyStart]?.created_at ?? session.started_at;
 
   // The API requires the conversation to begin with a user turn, but a session
   // usually opens with Quinn's greeting, and the writer's first message is often
@@ -627,15 +636,18 @@ export async function sendSessionMessage(
     ? { entries: [], ids: new Set<string>() }
     : await loadCorpusOverview(session.project_id);
 
-  // Per-turn retrieval for this message: pieces named (or targeted by a
-  // workflow) and keyword matches, skipping anything already in the prompt.
+  // Per-turn retrieval for this message: the full text of pieces the writer
+  // named (or a workflow targets) that aren't already in the prompt. Anything
+  // else, Quinn looks up herself with the archive tools.
   const forcedTitles = [workflowState?.targetPieceTitle, commandForcedTitle].filter(
     (t): t is string => !!t
   );
-  const corpusContext = await loadCorpusContext(session.project_id, content, forcedTitles, {
-    inPrompt: inCachedPrompt,
-    excerptedInPrompt: corpusOverview.ids,
-  });
+  const corpusContext = await loadCorpusContext(
+    session.project_id,
+    content,
+    forcedTitles,
+    inCachedPrompt
+  );
 
   // Load the full manuscript map (Scrivener binder structure) so Quinn always
   // knows what exists and where, with a logline for every piece.
@@ -762,6 +774,7 @@ export async function sendSessionMessage(
     },
     taskInstructions: getTaskInstructions(taskType),
     ethicsPrompt: getEthicsPrompt(),
+    toolsGuide: ARCHIVE_TOOLS_GUIDE,
     manuscriptText: manuscript.bookText,
     outsideText: manuscript.outsideText,
     corpusOverview: corpusOverview.entries,
@@ -778,6 +791,17 @@ export async function sendSessionMessage(
     retrievedContext: corpusContext,
   });
 
+  // Quinn can look up what isn't in the prompt: the writer's other writing,
+  // past conversations, and earlier versions of pieces. The same tools go with
+  // every coaching request, since they're part of the cached prefix.
+  const toolContext: ArchiveToolContext = {
+    userId,
+    projectId: session.project_id,
+    sessionId,
+    inPrompt: inCachedPrompt,
+    visibleSince,
+  };
+
   // Stream response via SSE
   const { promise } = streamToSSE(res, {
     systemPrompt: system,
@@ -785,6 +809,10 @@ export async function sendSessionMessage(
     model: routingDecision.model,
     modelReason: routingDecision.reason,
     effort,
+    tools: {
+      definitions: ARCHIVE_TOOLS,
+      run: (call, announce) => runArchiveTool(toolContext, call, announce),
+    },
   });
 
   // Wait for stream to complete
@@ -1505,31 +1533,29 @@ async function loadNamedDocuments(
 }
 
 /**
- * Load per-turn corpus material for the writer's message.
+ * Load per-turn corpus material for the writer's message: the FULL text of
+ * documents the writer named by title (or a workflow or mode targets), so deep
+ * work on a specific piece is exact.
  *
- * Two strategies, in priority order:
- * 0. Named: documents the writer references by title (or a workflow forces) are
- *    loaded as FULL text, not excerpts, so deep work on a specific piece is exact.
- * 1. Relevance: documents whose title or content matches keywords in the
- *    user's current message (so asking about a topic surfaces related pieces).
+ * This used to add 3,000-character excerpts of every document matching words
+ * in the message. Quinn now searches the archive herself with tools when she
+ * needs to, which is more precise and doesn't add up to 60k characters of
+ * uncached excerpts to every turn.
  *
  * Nothing is sent twice: `inPrompt` documents (the full manuscript, and in
- * whole-corpus modes everything outside it) are skipped entirely, and
- * `excerptedInPrompt` documents (the overview excerpts) are skipped by keyword
- * matching but still loaded in full when named. Trash is always excluded.
+ * whole-corpus modes everything outside it) are skipped. Trash is excluded.
  */
 async function loadCorpusContext(
   projectId: string,
   userMessage: string | undefined,
   forcedTitles: string[],
-  already: { inPrompt: Set<string>; excerptedInPrompt: Set<string> }
+  inPrompt: Set<string>
 ): Promise<string[]> {
-  const seen = new Set<string>(already.inPrompt);
+  const seen = new Set<string>(inPrompt);
   const docs: Array<{ title: string; content: string; full?: boolean }> = [];
   const trashIds = await loadTrashDocumentIds(projectId);
 
-  // 0. Named / forced documents — full text, highest priority.
-  const named = await loadNamedDocuments(projectId, userMessage, forcedTitles, trashIds, already.inPrompt);
+  const named = await loadNamedDocuments(projectId, userMessage, forcedTitles, trashIds, inPrompt);
   const MAX_NAMED_CHARS = 24000; // ~4-5k words; covers a long essay in full
   for (const d of named) {
     if (seen.has(d.id)) continue;
@@ -1539,51 +1565,6 @@ async function loadCorpusContext(
         ? d.content.slice(0, MAX_NAMED_CHARS) + '\n...[truncated]'
         : d.content;
     docs.push({ title: d.title, content, full: true });
-  }
-
-  // 1. Relevance-matched documents (if we have a message to match against)
-
-  if (userMessage && userMessage.trim().length > 0) {
-    // Build a tsquery from the message words (OR-joined, prefix-matched)
-    const keywords = userMessage
-      .toLowerCase()
-      .replace(/[^a-z0-9\s]/g, ' ')
-      .split(/\s+/)
-      .filter((w) => w.length > 3) // skip short/common words
-      .slice(0, 12);
-
-    if (keywords.length > 0) {
-      const tsquery = keywords.map((w) => `${w}:*`).join(' | ');
-      try {
-        const relevant = await query<{ id: string; title: string; content: string }>(
-          `SELECT id, title, content,
-                  ts_rank(
-                    to_tsvector('english', coalesce(title,'') || ' ' || coalesce(content,'')),
-                    to_tsquery('english', $2)
-                  ) AS rank
-           FROM corpus_documents
-           WHERE project_id = $1
-             AND is_folder = false
-             AND content != ''
-             AND to_tsvector('english', coalesce(title,'') || ' ' || coalesce(content,'')) @@ to_tsquery('english', $2)
-           ORDER BY rank DESC
-           LIMIT 15`,
-          [projectId, tsquery]
-        );
-
-        for (const row of relevant.rows) {
-          if (trashIds.has(row.id)) continue; // never surface deleted work
-          if (already.excerptedInPrompt.has(row.id)) continue; // its excerpt is already there
-          if (!seen.has(row.id)) { // also skips pieces already in full in the prompt
-            seen.add(row.id);
-            docs.push({ title: row.title, content: row.content });
-          }
-        }
-      } catch (err) {
-        // Full-text query can fail on malformed input — fall through to baseline
-        console.warn('[Corpus] Relevance search failed:', err instanceof Error ? err.message : err);
-      }
-    }
   }
 
   return docs.map(formatCorpusEntry);

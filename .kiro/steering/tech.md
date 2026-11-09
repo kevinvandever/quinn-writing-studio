@@ -73,12 +73,14 @@ There is **no local running instance of this app**. The owner does not run the b
 
 ### What DOES run locally
 
-Only the **Scrivener watcher** (`npm run scriv:watch -w @quinn/backend`). The local `packages/backend/.env` is **watcher-only** config:
+Only the **Scrivener watcher** (`npm run scriv:watch -w @quinn/backend`) and, on demand, the quality check runner described below. The local `packages/backend/.env` is config for these local tools only:
 - `SCRIV_BACKUP_DIR`, `SCRIV_PROJECT_NAME`, `SCRIV_PROJECT_ID`, `SCRIV_DEBOUNCE_MS`
 - `QUINN_API_URL` (the Railway backend URL the watcher syncs to)
 - `QUINN_EMAIL` / `QUINN_PASSWORD` (login creds for the watcher)
 
 It is NOT a full backend `.env` and cannot run the backend. The watcher detects new Scrivener backups and POSTs parsed corpus data to the Railway backend's `/corpus/sync` endpoint. After every backup it also uploads any Scrivener snapshots the backend doesn't have yet (`GET /corpus/snapshots/keys`, then `POST /corpus/snapshots`). The watcher runs from source in this repo, so **restart it after changing watcher or parser code**; pushing to `main` doesn't update it.
+
+The **quality check runner** (`npm run quality-check -w @quinn/backend`, see "Quality check" below) is the other local tool. It uses the same `.env` values to log in and runs test conversations against the Railway backend. It costs real API money, so don't run it casually.
 
 ### Practical implications
 
@@ -128,3 +130,14 @@ Sync change detection (`detectChanges` in `scrivener-parser.service.ts`) covers 
 `streamToSSE` in `claude-api.service.ts` runs the loop: when a request stops with `tool_use`, it echoes the assistant content exactly as received (thinking blocks and signatures included; Sonnet/Opus 5.5 reject rebuilt turns and edits before a thinking block), runs every call, sends the results, and continues. The conversation is append-only within a turn and no cache breakpoints move. Limits: 6 rounds with real results, then one round of "limit reached" results, then the reply ends; 160k characters of results per reply. Text from all rounds streams as one reply (new paragraph after a tool round). Each lookup sends an `activity` SSE event (`{ label }`) that `CoachingWorkspace` shows as a status line. Only the final text is stored in `messages`; tool exchanges are not kept in later history.
 
 Per-turn keyword retrieval (3k excerpts of every document matching words in the message) was removed when the tools arrived; only pieces the writer names (or a mode targets) are still loaded automatically. Forced tool use (`tool_choice: any/tool`) returns 400 on the 5.5 models, so steer tool use with the guide text, not `tool_choice`.
+
+### Quality check (test conversations)
+
+A set of test conversations that measure Quinn on the writer's real project, so prompt, model, and tool changes can be compared before and after. Cases live in `evals/quinn-cases.json` (format and placeholder list in `services/quality-check.schema.ts`). Run them with `npm run quality-check -w @quinn/backend` (`--list`, `--check` to validate the file, `--case <id>` for a subset, `--yes` to skip the cost prompt). A full run costs about $1.25 on Sonnet: the first request writes the cached prompt, and the rest read it.
+
+- **No writing in the repo.** The repo is public, so cases use placeholders (`{{book_piece:a}}`, `{{outside_word:e}}`, `{{old_session_word:s}}`, ...) that the backend fills from the writer's files at run time, picking deterministically by slot name. Reports quote the manuscript, so `evals/reports/` is gitignored.
+- **Nothing stored.** `POST /api/projects/:id/quality-check` runs one case: `buildTurnRequest` (the same request builder as real coaching turns, with `assumeGreeted` so no welcome-back cues) and `runModelTurn` (the same tool loop), with no session, message, or notebook writes. Spend is logged under `quality_check`. The response is whitespace every 15 s, then JSON, to survive Railway's idle timeout.
+- **Grading.** Plain checks (`mention`, `mentionAny`, `notMention`, `tools`, plus warnings for `noTools`, `maxWords`, and the ethics phrase check) and, when a case has a `rubric`, a Sonnet grader that gets reference material from the writer's files (`reference`). A case passes when every hard check and every rubric criterion passes.
+- Reports (`evals/reports/<date-time>.md` and `.json`) compare each run with the previous one.
+
+When changing `sendSessionMessage`/`buildTurnRequest`, keep real turns identical: the refactor that split them was verified by capturing every request and stored message for a scripted set of turns before and after.

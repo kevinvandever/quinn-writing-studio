@@ -245,9 +245,10 @@ const MAX_TOOL_ROUNDS = 6;
 const MAX_TOOL_RESULT_CHARS = 160_000;
 const TOOL_LIMIT_MESSAGE =
   "That's as much looking up as one reply allows. Answer with what you have, and tell the writer you can look further if they'd like.";
+const MAX_RETRIES = 4;
 
-/** Raised inside the stream when the caller aborted it. */
-class StreamAbortedError extends Error {
+/** Raised when the caller cancelled the reply. */
+export class StreamAbortedError extends Error {
   constructor() {
     super('Stream aborted');
     this.name = 'StreamAbortedError';
@@ -255,16 +256,252 @@ class StreamAbortedError extends Error {
 }
 
 /**
- * Pipe Anthropic stream events to an Express Response as Server-Sent Events.
- * Sends events: 'model_info', 'token', 'activity' (what Quinn is looking up),
- * 'retrying', 'done', 'error'.
+ * Determine if an error is transient and worth retrying.
+ * Overloaded (529), rate limit (429), and server errors (5xx) are transient.
+ */
+export function isRetryableError(error: unknown): boolean {
+  const err = error as { status?: number; error?: { type?: string }; message?: string };
+  if (err?.status === 529 || err?.status === 429 || (err?.status && err.status >= 500)) {
+    return true;
+  }
+  const errorType = err?.error?.type || '';
+  if (errorType === 'overloaded_error' || errorType === 'api_error' || errorType === 'rate_limit_error') {
+    return true;
+  }
+  const msg = (err?.message || '').toLowerCase();
+  return msg.includes('overloaded') || msg.includes('rate limit') || msg.includes('timeout');
+}
+
+/** One tool call made during a reply. */
+export interface ToolCallRecord {
+  name: string;
+  input: unknown;
+  resultChars: number;
+  isError: boolean;
+}
+
+/** A finished reply: its text, token usage across every request, and the tool calls made. */
+export interface ModelTurnResult extends ClaudeResponse {
+  stopReason: Anthropic.Messages.StopReason | null;
+  toolCalls: ToolCallRecord[];
+}
+
+export interface ModelTurnOptions {
+  systemPrompt: SystemPrompt;
+  /** May carry content blocks (e.g. a cache breakpoint, or per-turn context). */
+  messages: Anthropic.Messages.MessageParam[];
+  model: ModelSelection;
+  modelReason: string;
+  effort: Effort;
+  tools?: StreamTools;
+  /** Each piece of reply text, as it streams. */
+  onText?: (text: string) => void;
+  /** What Quinn is looking up. */
+  onActivity?: (label: string) => void;
+  /** A transient error is being retried. */
+  onRetry?: (attempt: number, delayMs: number) => void;
+  /** Return true to stop; the reply then ends with a StreamAbortedError. */
+  isCancelled?: () => boolean;
+  /** The SDK stream of the current request, so a caller can abort it. */
+  onStream?: (stream: ReturnType<typeof anthropic.messages.stream>) => void;
+}
+
+/**
+ * One request, streamed. Retries with exponential backoff on a transient
+ * error, as long as this request hasn't streamed any text yet.
+ */
+function requestOnce(
+  options: ModelTurnOptions,
+  conversation: Anthropic.Messages.MessageParam[],
+  onText: (text: string) => void
+): Promise<Anthropic.Messages.Message> {
+  const { systemPrompt, effort, tools } = options;
+  const modelId = MODEL_MAP[options.model];
+  const cancelled = (): boolean => options.isCancelled?.() ?? false;
+  return new Promise((resolve, reject) => {
+    const attempt = (retryCount: number): void => {
+      if (cancelled()) {
+        reject(new StreamAbortedError());
+        return;
+      }
+      let streamedAnyText = false;
+      // The SDK emits 'end' right after 'error'. This flag tells the 'end'
+      // handler that the error handler already decided this attempt's
+      // outcome (retry or fail), so it must not report anything itself.
+      let failed = false;
+      const stream = anthropic.messages.stream({
+        model: modelId,
+        max_tokens: COACHING_MAX_TOKENS,
+        output_config: { effort },
+        system: systemPrompt,
+        messages: conversation,
+        ...(tools ? { tools: tools.definitions } : {}),
+      });
+      options.onStream?.(stream);
+
+      stream.on('text', (text) => {
+        if (cancelled()) return;
+        streamedAnyText = true;
+        onText(text);
+      });
+
+      stream.on('error', (error) => {
+        failed = true;
+        if (cancelled()) {
+          reject(new StreamAbortedError());
+          return;
+        }
+        if (!streamedAnyText && retryCount < MAX_RETRIES && isRetryableError(error)) {
+          const delayMs = Math.min(1000 * Math.pow(2, retryCount), 8000);
+          console.warn(
+            `[Claude] Transient error (${(error as Error).message}). Retry ${retryCount + 1}/${MAX_RETRIES} in ${delayMs}ms`
+          );
+          options.onRetry?.(retryCount + 1, delayMs);
+          setTimeout(() => attempt(retryCount + 1), delayMs);
+          return;
+        }
+        reject(error);
+      });
+
+      stream.on('end', () => {
+        if (failed) return;
+        if (cancelled()) {
+          reject(new StreamAbortedError());
+          return;
+        }
+        stream.finalMessage().then(resolve, reject);
+      });
+    };
+    attempt(0);
+  });
+}
+
+/**
+ * Run one reply to the end. With `tools`, a reply can take several requests:
+ * when the model calls tools, they're run, their results are sent back with
+ * the model's own turn echoed exactly as received (thinking blocks included,
+ * as the API requires), and the model continues. Text from every request
+ * comes through `onText` as one reply.
  *
- * With `tools`, a reply can take several requests: when the model calls
- * tools, they're run, their results are sent back with the model's own turn
- * echoed exactly as received (thinking blocks included, as the API requires),
- * and the model continues. Text from every request streams to the writer as
- * one reply. Each request is retried on transient errors until it has
- * streamed text.
+ * Throws the API error when a request fails for good (after retries), or a
+ * StreamAbortedError when cancelled. An empty `content` means the model
+ * produced no text (e.g. it declined, or thinking used the output budget).
+ */
+export async function runModelTurn(options: ModelTurnOptions): Promise<ModelTurnResult> {
+  const { tools } = options;
+  const modelId = MODEL_MAP[options.model];
+  const conversation: Anthropic.Messages.MessageParam[] = [...options.messages];
+  let fullContent = '';
+  // Text after a tool round starts a new paragraph of the same reply.
+  let startsNewParagraph = false;
+  const emit = (text: string): void => {
+    fullContent += text;
+    options.onText?.(text);
+  };
+  const onText = (text: string): void => {
+    if (startsNewParagraph) {
+      startsNewParagraph = false;
+      if (fullContent && !/\s$/.test(fullContent) && !/^\s/.test(text)) emit('\n\n');
+    }
+    emit(text);
+  };
+
+  let inputTokens = 0;
+  let outputTokens = 0;
+  const cache: CacheUsage = { readTokens: 0, write5mTokens: 0, write1hTokens: 0 };
+  const toolCalls: ToolCallRecord[] = [];
+  let toolRounds = 0;
+  let toolResultChars = 0;
+  let finalMessage: Anthropic.Messages.Message;
+
+  for (;;) {
+    finalMessage = await requestOnce(options, conversation, onText);
+    inputTokens += finalMessage.usage.input_tokens;
+    outputTokens += finalMessage.usage.output_tokens;
+    const used = cacheUsageFrom(finalMessage.usage);
+    cache.readTokens += used.readTokens;
+    cache.write5mTokens += used.write5mTokens;
+    cache.write1hTokens += used.write1hTokens;
+
+    const calls = finalMessage.content.filter(
+      (block): block is Anthropic.Messages.ToolUseBlock => block.type === 'tool_use'
+    );
+    if (!tools || finalMessage.stop_reason !== 'tool_use' || calls.length === 0) break;
+    if (toolRounds > MAX_TOOL_ROUNDS) {
+      console.warn(`[Claude] ${modelId} kept calling tools past the limit; ending the reply`);
+      break;
+    }
+    toolRounds++;
+
+    // Echo the model's turn exactly as received, then answer every call.
+    conversation.push({
+      role: 'assistant',
+      content: finalMessage.content as Anthropic.Messages.ContentBlockParam[],
+    });
+    const results: Anthropic.Messages.ToolResultBlockParam[] = [];
+    for (const call of calls) {
+      let outcome: { content: string; isError?: boolean };
+      const limited = toolRounds > MAX_TOOL_ROUNDS || toolResultChars >= MAX_TOOL_RESULT_CHARS;
+      if (limited) {
+        outcome = { content: TOOL_LIMIT_MESSAGE };
+      } else {
+        try {
+          outcome = await tools.run({ id: call.id, name: call.name, input: call.input }, (label) =>
+            options.onActivity?.(label)
+          );
+        } catch (err) {
+          console.warn(`[Claude] Tool ${call.name} failed:`, err instanceof Error ? err.message : err);
+          outcome = { content: 'The lookup failed on the app side. Carry on without it.', isError: true };
+        }
+      }
+      toolResultChars += outcome.content.length;
+      if (!limited) {
+        toolCalls.push({
+          name: call.name,
+          input: call.input,
+          resultChars: outcome.content.length,
+          isError: !!outcome.isError,
+        });
+      }
+      results.push({
+        type: 'tool_result',
+        tool_use_id: call.id,
+        content: outcome.content,
+        ...(outcome.isError ? { is_error: true } : {}),
+      });
+    }
+    conversation.push({ role: 'user', content: results });
+    startsNewParagraph = true;
+  }
+
+  if (finalMessage.stop_reason === 'max_tokens') {
+    console.warn(`[Claude] ${modelId} hit max_tokens (${COACHING_MAX_TOKENS}) at effort ${options.effort}`);
+  }
+  if (toolRounds > 0) {
+    console.log(`[Claude] Reply used ${toolRounds} tool round(s), ${toolResultChars} characters of results`);
+  }
+  if (!fullContent.trim()) {
+    console.warn(
+      `[Claude] ${modelId} returned no text (stop_reason: ${finalMessage.stop_reason}, output tokens: ${outputTokens})`
+    );
+  }
+
+  return {
+    content: fullContent,
+    model: options.model,
+    reason: options.modelReason,
+    inputTokens,
+    outputTokens,
+    cache,
+    stopReason: finalMessage.stop_reason,
+    toolCalls,
+  };
+}
+
+/**
+ * Run one reply (see runModelTurn) and pipe it to an Express Response as
+ * Server-Sent Events: 'model_info', 'token', 'activity' (what Quinn is
+ * looking up), 'retrying', 'done', 'error'.
  *
  * Resolves with empty content (after sending an 'error' event) when the model
  * produced no text, e.g. thinking used the whole output budget or the model
@@ -272,19 +509,8 @@ class StreamAbortedError extends Error {
  */
 export function streamToSSE(
   res: Response,
-  options: {
-    systemPrompt: SystemPrompt;
-    /** May carry content blocks (e.g. a cache breakpoint, or per-turn context). */
-    messages: Anthropic.Messages.MessageParam[];
-    model: ModelSelection;
-    modelReason: string;
-    effort: Effort;
-    tools?: StreamTools;
-  }
-): { promise: Promise<ClaudeResponse>; abort: () => void } {
-  const { systemPrompt, messages, model, modelReason, effort, tools } = options;
-  const modelId = MODEL_MAP[model];
-
+  options: Omit<ModelTurnOptions, 'onText' | 'onActivity' | 'onRetry' | 'isCancelled' | 'onStream'>
+): { promise: Promise<ModelTurnResult>; abort: () => void } {
   // Set SSE headers
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache');
@@ -301,7 +527,7 @@ export function streamToSSE(
     res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
   }
 
-  send('model_info', { model, reason: modelReason });
+  send('model_info', { model: options.model, reason: options.modelReason });
 
   // The model can think for a while before its first token, and tool lookups
   // add pauses. An SSE comment every 15s keeps proxies from treating the quiet
@@ -320,167 +546,19 @@ export function streamToSSE(
     if (!res.writableEnded) res.end();
   }
 
-  /**
-   * Determine if an error is transient and worth retrying.
-   * Overloaded (529), rate limit (429), and server errors (5xx) are transient.
-   */
-  function isRetryableError(error: unknown): boolean {
-    const err = error as { status?: number; error?: { type?: string }; message?: string };
-    if (err?.status === 529 || err?.status === 429 || (err?.status && err.status >= 500)) {
-      return true;
-    }
-    const errorType = err?.error?.type || '';
-    if (errorType === 'overloaded_error' || errorType === 'api_error' || errorType === 'rate_limit_error') {
-      return true;
-    }
-    const msg = (err?.message || '').toLowerCase();
-    return msg.includes('overloaded') || msg.includes('rate limit') || msg.includes('timeout');
-  }
-
-  const MAX_RETRIES = 4;
-
-  /**
-   * One request, streamed. Retries with exponential backoff on a transient
-   * error, as long as this request hasn't streamed any text yet.
-   */
-  function requestOnce(
-    conversation: Anthropic.Messages.MessageParam[],
-    onText: (text: string) => void
-  ): Promise<Anthropic.Messages.Message> {
-    return new Promise((resolve, reject) => {
-      const attempt = (retryCount: number): void => {
-        if (aborted || finished) {
-          reject(new StreamAbortedError());
-          return;
-        }
-        let streamedAnyText = false;
-        // The SDK emits 'end' right after 'error'. This flag tells the 'end'
-        // handler that the error handler already decided this attempt's
-        // outcome (retry or fail), so it must not report anything itself.
-        let failed = false;
-        const stream = anthropic.messages.stream({
-          model: modelId,
-          max_tokens: COACHING_MAX_TOKENS,
-          output_config: { effort },
-          system: systemPrompt,
-          messages: conversation,
-          ...(tools ? { tools: tools.definitions } : {}),
-        });
-        currentStream = stream;
-
-        stream.on('text', (text) => {
-          if (aborted || finished) return;
-          streamedAnyText = true;
-          onText(text);
-        });
-
-        stream.on('error', (error) => {
-          failed = true;
-          if (aborted || finished) {
-            reject(new StreamAbortedError());
-            return;
-          }
-          if (!streamedAnyText && retryCount < MAX_RETRIES && isRetryableError(error)) {
-            const delayMs = Math.min(1000 * Math.pow(2, retryCount), 8000);
-            console.warn(
-              `[Claude] Transient error (${(error as Error).message}). Retry ${retryCount + 1}/${MAX_RETRIES} in ${delayMs}ms`
-            );
-            // Let the client know we're retrying so the UI can show a status
-            send('retrying', { attempt: retryCount + 1, delayMs });
-            setTimeout(() => attempt(retryCount + 1), delayMs);
-            return;
-          }
-          reject(error);
-        });
-
-        stream.on('end', () => {
-          if (failed) return;
-          if (aborted || finished) {
-            reject(new StreamAbortedError());
-            return;
-          }
-          stream.finalMessage().then(resolve, reject);
-        });
-      };
-      attempt(0);
-    });
-  }
-
-  const promise = (async (): Promise<ClaudeResponse> => {
-    const conversation: Anthropic.Messages.MessageParam[] = [...messages];
-    let fullContent = '';
-    // Text after a tool round starts a new paragraph of the same reply.
-    let startsNewParagraph = false;
-    const onText = (text: string): void => {
-      if (startsNewParagraph) {
-        startsNewParagraph = false;
-        if (fullContent && !/\s$/.test(fullContent) && !/^\s/.test(text)) {
-          fullContent += '\n\n';
-          send('token', { token: '\n\n' });
-        }
-      }
-      fullContent += text;
-      send('token', { token: text });
-    };
-
-    let inputTokens = 0;
-    let outputTokens = 0;
-    const cache: CacheUsage = { readTokens: 0, write5mTokens: 0, write1hTokens: 0 };
-    let toolRounds = 0;
-    let toolResultChars = 0;
-    let finalMessage: Anthropic.Messages.Message;
-
+  const promise = (async (): Promise<ModelTurnResult> => {
+    let result: ModelTurnResult;
     try {
-      for (;;) {
-        finalMessage = await requestOnce(conversation, onText);
-        inputTokens += finalMessage.usage.input_tokens;
-        outputTokens += finalMessage.usage.output_tokens;
-        const used = cacheUsageFrom(finalMessage.usage);
-        cache.readTokens += used.readTokens;
-        cache.write5mTokens += used.write5mTokens;
-        cache.write1hTokens += used.write1hTokens;
-
-        const calls = finalMessage.content.filter(
-          (block): block is Anthropic.Messages.ToolUseBlock => block.type === 'tool_use'
-        );
-        if (!tools || finalMessage.stop_reason !== 'tool_use' || calls.length === 0) break;
-        if (toolRounds > MAX_TOOL_ROUNDS) {
-          console.warn(`[Claude] ${modelId} kept calling tools past the limit; ending the reply`);
-          break;
-        }
-        toolRounds++;
-
-        // Echo the model's turn exactly as received, then answer every call.
-        conversation.push({
-          role: 'assistant',
-          content: finalMessage.content as Anthropic.Messages.ContentBlockParam[],
-        });
-        const results: Anthropic.Messages.ToolResultBlockParam[] = [];
-        for (const call of calls) {
-          let outcome: { content: string; isError?: boolean };
-          if (toolRounds > MAX_TOOL_ROUNDS || toolResultChars >= MAX_TOOL_RESULT_CHARS) {
-            outcome = { content: TOOL_LIMIT_MESSAGE };
-          } else {
-            try {
-              outcome = await tools.run({ id: call.id, name: call.name, input: call.input }, (label) =>
-                send('activity', { label })
-              );
-            } catch (err) {
-              console.warn(`[Claude] Tool ${call.name} failed:`, err instanceof Error ? err.message : err);
-              outcome = { content: 'The lookup failed on the app side. Carry on without it.', isError: true };
-            }
-          }
-          toolResultChars += outcome.content.length;
-          results.push({
-            type: 'tool_result',
-            tool_use_id: call.id,
-            content: outcome.content,
-            ...(outcome.isError ? { is_error: true } : {}),
-          });
-        }
-        conversation.push({ role: 'user', content: results });
-        startsNewParagraph = true;
-      }
+      result = await runModelTurn({
+        ...options,
+        onText: (text) => send('token', { token: text }),
+        onActivity: (label) => send('activity', { label }),
+        onRetry: (attempt, delayMs) => send('retrying', { attempt, delayMs }),
+        isCancelled: () => aborted || finished,
+        onStream: (stream) => {
+          currentStream = stream;
+        },
+      });
     } catch (error) {
       if (error instanceof StreamAbortedError) throw error;
       const friendlyMessage = isRetryableError(error)
@@ -490,39 +568,20 @@ export function streamToSSE(
       throw error;
     }
 
-    const response: ClaudeResponse = {
-      content: fullContent,
-      model,
-      reason: modelReason,
-      inputTokens,
-      outputTokens,
-      cache,
-    };
-
-    if (finalMessage.stop_reason === 'max_tokens') {
-      console.warn(`[Claude] ${modelId} hit max_tokens (${COACHING_MAX_TOKENS}) at effort ${effort}`);
-    }
-    if (toolRounds > 0) {
-      console.log(`[Claude] Reply used ${toolRounds} tool round(s), ${toolResultChars} characters of results`);
-    }
-
-    if (!fullContent.trim()) {
-      console.warn(
-        `[Claude] ${modelId} returned no text (stop_reason: ${finalMessage.stop_reason}, output tokens: ${outputTokens})`
-      );
+    if (!result.content.trim()) {
       const message =
-        finalMessage.stop_reason === 'refusal'
+        result.stopReason === 'refusal'
           ? "Quinn couldn't respond to that one. Try rephrasing it."
           : "Quinn didn't finish a reply that time. Please try again.";
       finish({ name: 'error', data: { message } });
-      return response;
+      return result;
     }
 
     finish({
       name: 'done',
-      data: { inputTokens: totalInputTokens(response), outputTokens: response.outputTokens },
+      data: { inputTokens: totalInputTokens(result), outputTokens: result.outputTokens },
     });
-    return response;
+    return result;
   })();
 
   const abort = () => {

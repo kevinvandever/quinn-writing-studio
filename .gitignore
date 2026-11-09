@@ -38,3 +38,6 @@ coverage/
 
 # Scrivener watcher state
 .scriv-watcher-state.json
+
+# Quality check reports quote the writer's manuscript (the repo is public)
+evals/reports/

@@ -24,6 +24,7 @@ import { nudgesRouter } from './routes/nudges.routes.js';
 import { themesRouter } from './routes/themes.routes.js';
 import { settingsRouter } from './routes/settings.routes.js';
 import { exportRouter } from './routes/export.routes.js';
+import { qualityCheckRouter } from './routes/quality-check.routes.js';
 import { startScheduler } from './jobs/job-scheduler.js';
 
 const app = express();
@@ -107,6 +108,7 @@ app.use('/api/nudges', nudgesRouter);
 app.use('/api/themes', themesRouter);
 app.use('/api/settings', settingsRouter);
 app.use('/api/export', exportRouter);
+app.use('/api', qualityCheckRouter);
 
 // Catch-all for unmatched routes (must be after all route definitions)
 app.use(notFoundHandler);

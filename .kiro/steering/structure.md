@@ -33,6 +33,8 @@ quinn-writing-studio/
 │   │   │   │   ├── manuscript-context.service.ts # Full text of the book (Draft folder + front/back matter) for the cached prompt
 │   │   │   │   ├── notebook.service.ts          # Quinn's notebook: long-term notes per project, revised after each session
 │   │   │   │   ├── archive-tools.service.ts     # Tools Quinn calls mid-reply: search/read writing, search conversations, piece history
+│   │   │   │   ├── quality-check.service.ts     # Runs and grades one test conversation (no writes besides usage)
+│   │   │   │   ├── quality-check.schema.ts      # Test case format + placeholder list (shared with the local runner)
 │   │   │   │   ├── substack-sync.service.ts     # RSS/API sync
 │   │   │   │   ├── theme-analysis.service.ts    # Cross-project themes
 │   │   │   │   ├── intelligence.service.ts      # Grant/news/publishing pipeline
@@ -48,6 +50,7 @@ quinn-writing-studio/
 │   │   │   │   ├── publishing-scanner.job.ts
 │   │   │   │   └── nudge-checker.job.ts
 │   │   │   ├── schemas/                 # Zod schemas (persona validation)
+│   │   │   ├── tools/                   # Local tools: scrivener-watcher.ts, quality-check.ts (run on Kevin's Mac)
 │   │   │   ├── types/                   # TypeScript type extensions
 │   │   │   └── utils/
 │   │   │       ├── encryption.ts        # AES-256-GCM encrypt/decrypt
@@ -85,6 +88,10 @@ quinn-writing-studio/
 │       │   └── utils/                   # Utilities (diff)
 │       ├── netlify.toml
 │       └── postcss.config.js
+│
+├── evals/
+│   ├── quinn-cases.json                 # Quality check test conversations (placeholders only: the repo is public)
+│   └── reports/                         # Run reports (gitignored: they quote the manuscript)
 │
 └── README.md
 

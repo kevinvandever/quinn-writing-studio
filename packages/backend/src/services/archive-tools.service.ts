@@ -201,9 +201,9 @@ function clip(value: string, max: number): string {
 
 // ─── The writer's library ────────────────────────────────────────────────────
 
-type Area = 'book' | 'binder' | 'trash' | 'other';
+export type Area = 'book' | 'binder' | 'trash' | 'other';
 
-interface DocInfo {
+export interface DocInfo {
   id: string;
   title: string;
   projectId: string;
@@ -220,7 +220,7 @@ interface DocInfo {
 }
 
 /** Every document in the writer's active projects, with where it lives (no text). */
-async function loadLibrary(userId: string): Promise<Map<string, DocInfo>> {
+export async function loadLibrary(userId: string): Promise<Map<string, DocInfo>> {
   const result = await query<{
     id: string;
     parent_id: string | null;

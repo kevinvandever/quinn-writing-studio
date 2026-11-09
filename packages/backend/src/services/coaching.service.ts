@@ -10,6 +10,7 @@ import {
   CACHE_1H,
   type ClaudeMessage,
   type ClaudeResponse,
+  type StreamTools,
   type Effort,
   type ModelSelection,
   type ModelRoutingPreference,
@@ -536,6 +537,133 @@ export async function sendSessionMessage(
   const allMessages = messagesResult.rows
     .filter((m) => m.role === 'user' || m.role === 'assistant');
 
+  const turn = await buildTurnRequest({
+    userId,
+    projectId: session.project_id,
+    project,
+    sessionId,
+    sessionType: session.session_type,
+    sessionStartedAt: session.started_at,
+    history: allMessages,
+    content,
+    claudeDirective,
+    workflowState,
+    command: {
+      context: commandContext,
+      forcedTitle: commandForcedTitle,
+      preferOpus: commandPreferOpus,
+      readsWholeCorpus: commandReadsWholeCorpus,
+    },
+  });
+
+  // Stream response via SSE
+  const { promise } = streamToSSE(res, {
+    systemPrompt: turn.system,
+    messages: turn.messages,
+    model: turn.model,
+    modelReason: turn.modelReason,
+    effort: turn.effort,
+    tools: turn.tools,
+  });
+
+  // Wait for stream to complete
+  const claudeResponse: ClaudeResponse = await promise;
+
+  // No text came back (the writer already saw an error). The tokens were still
+  // billed, so log them, but don't store an empty reply: it would break the
+  // next request, since the API rejects empty message content.
+  if (!claudeResponse.content.trim()) {
+    await logApiUsage(
+      userId,
+      claudeResponse.model,
+      turn.taskType,
+      claudeResponse.inputTokens,
+      claudeResponse.outputTokens,
+      claudeResponse.cache
+    );
+    return;
+  }
+
+  // Persist assistant message
+  await query(
+    `INSERT INTO messages (session_id, role, content, model_used, model_reason, token_count_input, token_count_output)
+     VALUES ($1, 'assistant', $2, $3, $4, $5, $6)`,
+    [
+      sessionId,
+      claudeResponse.content,
+      claudeResponse.model,
+      turn.modelReason,
+      totalInputTokens(claudeResponse),
+      claudeResponse.outputTokens,
+    ]
+  );
+
+  // Log API usage
+  await logApiUsage(
+    userId,
+    claudeResponse.model,
+    turn.taskType,
+    claudeResponse.inputTokens,
+    claudeResponse.outputTokens,
+    claudeResponse.cache
+  );
+
+  // Check ethics violations
+  if (checkEthicsViolation(claudeResponse.content)) {
+    await logEthicsBoundary(userId, sessionId, content, claudeResponse.content);
+  }
+}
+
+/** Everything needed to build one coaching request. */
+export interface TurnRequestInput {
+  userId: string;
+  projectId: string;
+  project: { name: string; central_question: string | null; description: string | null };
+  sessionId: string;
+  sessionType: SessionType;
+  sessionStartedAt: Date;
+  /** The session's messages so far, oldest first, including the writer's new one. */
+  history: Array<Pick<MessageRow, 'role' | 'content' | 'model_used' | 'created_at'>>;
+  /** The writer's new message, as typed (used to find pieces named in it). */
+  content: string;
+  /** Replaces the writer's message for workflow commands (/next etc.). */
+  claudeDirective: string | null;
+  workflowState: WorkflowState | null;
+  command: {
+    context: string | null;
+    forcedTitle: string | null;
+    preferOpus: boolean;
+    readsWholeCorpus: boolean;
+  };
+  /** Treat Quinn as having greeted the writer already, so no welcome-back cues (quality checks). */
+  assumeGreeted?: boolean;
+}
+
+/** A coaching request, ready to send. */
+export interface TurnRequest {
+  system: Anthropic.Messages.TextBlockParam[];
+  messages: Anthropic.Messages.MessageParam[];
+  model: ModelSelection;
+  modelReason: string;
+  effort: Effort;
+  taskType: TaskType;
+  tools: StreamTools;
+}
+
+/**
+ * Build the request for one coaching turn: Quinn's prompt (persona, the
+ * manuscript, map, notebook, Session Memory, and this turn's context), the
+ * conversation, model routing, and her tools. Reads only; it writes nothing.
+ */
+export async function buildTurnRequest(input: TurnRequestInput): Promise<TurnRequest> {
+  const { userId, projectId, project, sessionId, sessionType, sessionStartedAt, content } = input;
+  const { claudeDirective, workflowState } = input;
+  const commandContext = input.command.context;
+  const commandForcedTitle = input.command.forcedTitle;
+  const commandPreferOpus = input.command.preferOpus;
+  const commandReadsWholeCorpus = input.command.readsWholeCorpus;
+  const allMessages = input.history;
+
   // Build the conversation as role/content pairs.
   const convoPairs: ClaudeMessage[] = allMessages.map((m) => ({
     role: m.role as 'user' | 'assistant',
@@ -587,7 +715,7 @@ export async function sendSessionMessage(
       : null;
   // Conversation search skips what this request already shows: this session
   // from the first message in the window on.
-  const visibleSince = allMessages[historyStart]?.created_at ?? session.started_at;
+  const visibleSince = allMessages[historyStart]?.created_at ?? sessionStartedAt;
 
   // The API requires the conversation to begin with a user turn, but a session
   // usually opens with Quinn's greeting, and the writer's first message is often
@@ -613,19 +741,19 @@ export async function sendSessionMessage(
   const modelPreference = await loadModelRoutingPreference(userId);
 
   // Load session summaries for context
-  const sessionSummaries = await loadSessionSummaries(session.project_id);
+  const sessionSummaries = await loadSessionSummaries(projectId);
 
   // Quinn's notebook: her long-term notes on this project (decisions, notes on
   // pieces, patterns, open threads), revised after each session ends.
-  const notebook = await loadNotebook(session.project_id);
-  const notebookContext = renderNotebookForPrompt(notebook, await pieceIndexFor(notebook, session.project_id));
+  const notebook = await loadNotebook(projectId);
+  const notebookContext = renderNotebookForPrompt(notebook, await pieceIndexFor(notebook, projectId));
 
   // The whole manuscript goes into the cached part of the prompt, so Quinn has
   // read every piece in full on every turn. Whole-corpus modes (/analyze, essay
   // triage) also get everything outside the book (salvage, notes, research).
   const activeWorkflow = workflowState ? getWorkflow(workflowState.workflowId) : undefined;
   const readsWholeCorpus = commandReadsWholeCorpus || !!activeWorkflow?.readsWholeCorpus;
-  const manuscript = await loadManuscriptContext(session.project_id, {
+  const manuscript = await loadManuscriptContext(projectId, {
     includeOutside: readsWholeCorpus,
   });
   const inCachedPrompt = new Set([...manuscript.bookIds, ...manuscript.outsideIds]);
@@ -634,7 +762,7 @@ export async function sendSessionMessage(
   // excerpts of their documents instead, also in the cached part.
   const corpusOverview = manuscript.bookText
     ? { entries: [], ids: new Set<string>() }
-    : await loadCorpusOverview(session.project_id);
+    : await loadCorpusOverview(projectId);
 
   // Per-turn retrieval for this message: the full text of pieces the writer
   // named (or a workflow targets) that aren't already in the prompt. Anything
@@ -643,7 +771,7 @@ export async function sendSessionMessage(
     (t): t is string => !!t
   );
   const corpusContext = await loadCorpusContext(
-    session.project_id,
+    projectId,
     content,
     forcedTitles,
     inCachedPrompt
@@ -651,10 +779,10 @@ export async function sendSessionMessage(
 
   // Load the full manuscript map (Scrivener binder structure) so Quinn always
   // knows what exists and where, with a logline for every piece.
-  const manuscriptMap = await loadManuscriptMap(session.project_id);
+  const manuscriptMap = await loadManuscriptMap(projectId);
 
   // Check inactivity for context
-  const inactivityDays = await checkInactivityGap(session.project_id);
+  const inactivityDays = await checkInactivityGap(projectId);
 
   // Load stale threshold for welcome-back detection
   const userSettings = await query<{ stale_corpus_threshold_days: number | null }>(
@@ -667,9 +795,9 @@ export async function sendSessionMessage(
   // belong only before Quinn's first reply in a session. Previously they were
   // sent on every turn, so she could welcome the writer back again and again.
   // The opener counts as a reply; static command replies (no model) don't.
-  const quinnHasReplied = allMessages.some(
-    (m) => m.role === 'assistant' && m.model_used !== null
-  );
+  const quinnHasReplied =
+    !!input.assumeGreeted ||
+    allMessages.some((m) => m.role === 'assistant' && m.model_used !== null);
 
   // Build activity context with welcome-back note if inactivity exceeds threshold
   let activityContext: string | null = null;
@@ -682,7 +810,7 @@ export async function sendSessionMessage(
   }
 
   // Load recent activity summary and append to activity context
-  const recentActivity = await getRecentActivitySummary(userId, session.project_id);
+  const recentActivity = await getRecentActivitySummary(userId, projectId);
   if (recentActivity) {
     activityContext = activityContext
       ? `${activityContext}\n\n${recentActivity}`
@@ -693,7 +821,7 @@ export async function sendSessionMessage(
   // passages cut, added, and rewritten. It stays the same through the sitting,
   // so it's cached with the map; only the cue to acknowledge it is per turn,
   // and only before Quinn's first reply.
-  const manuscriptChanges = await loadManuscriptChanges(session.project_id, CHANGES_BUDGET);
+  const manuscriptChanges = await loadManuscriptChanges(projectId, CHANGES_BUDGET);
   if (manuscriptChanges && !quinnHasReplied) {
     const cue =
       'The writer has changed the manuscript (see the Manuscript Changes section). Acknowledge their work naturally, and be specific about what you noticed.';
@@ -701,19 +829,19 @@ export async function sendSessionMessage(
   }
 
   // Determine task type for model routing
-  const taskType: TaskType = session.session_type === 'editorial_review'
+  const taskType: TaskType = sessionType === 'editorial_review'
     ? 'editorial'
-    : session.session_type === 'theme_analysis'
+    : sessionType === 'theme_analysis'
       ? 'theme_analysis'
-      : session.session_type === 'promptly_coaching'
+      : sessionType === 'promptly_coaching'
         ? 'promptly_coaching'
         : 'coaching';
 
   // Load Promptly-specific context if applicable
   let promptlyContext: string | null = null;
   let historicalPostCount = 0;
-  if (session.session_type === 'promptly_coaching') {
-    const promptlyData = await loadPromptlyContext(sessionId, session.project_id);
+  if (sessionType === 'promptly_coaching') {
+    const promptlyData = await loadPromptlyContext(sessionId, projectId);
     promptlyContext = promptlyData.context;
     historicalPostCount = promptlyData.historicalPostCount;
   }
@@ -747,9 +875,9 @@ export async function sendSessionMessage(
   // apparent Substack collisions. Null when nothing is earmarked.
   let firstRightsContext: string | null = null;
   try {
-    const earmarkedPieces = await loadEarmarkedPieces(session.project_id);
+    const earmarkedPieces = await loadEarmarkedPieces(projectId);
     if (earmarkedPieces.length > 0) {
-      const conflicts = await detectFirstRightsConflicts(userId, session.project_id);
+      const conflicts = await detectFirstRightsConflicts(userId, projectId);
       firstRightsContext = buildFirstRightsContext(earmarkedPieces, conflicts);
     }
   } catch (err) {
@@ -796,71 +924,24 @@ export async function sendSessionMessage(
   // every coaching request, since they're part of the cached prefix.
   const toolContext: ArchiveToolContext = {
     userId,
-    projectId: session.project_id,
+    projectId,
     sessionId,
     inPrompt: inCachedPrompt,
     visibleSince,
   };
 
-  // Stream response via SSE
-  const { promise } = streamToSSE(res, {
-    systemPrompt: system,
+  return {
+    system,
     messages: buildApiMessages(conversationMessages, turnContext),
     model: routingDecision.model,
     modelReason: routingDecision.reason,
     effort,
+    taskType,
     tools: {
       definitions: ARCHIVE_TOOLS,
       run: (call, announce) => runArchiveTool(toolContext, call, announce),
     },
-  });
-
-  // Wait for stream to complete
-  const claudeResponse: ClaudeResponse = await promise;
-
-  // No text came back (the writer already saw an error). The tokens were still
-  // billed, so log them, but don't store an empty reply: it would break the
-  // next request, since the API rejects empty message content.
-  if (!claudeResponse.content.trim()) {
-    await logApiUsage(
-      userId,
-      claudeResponse.model,
-      taskType,
-      claudeResponse.inputTokens,
-      claudeResponse.outputTokens,
-      claudeResponse.cache
-    );
-    return;
-  }
-
-  // Persist assistant message
-  await query(
-    `INSERT INTO messages (session_id, role, content, model_used, model_reason, token_count_input, token_count_output)
-     VALUES ($1, 'assistant', $2, $3, $4, $5, $6)`,
-    [
-      sessionId,
-      claudeResponse.content,
-      claudeResponse.model,
-      routingDecision.reason,
-      totalInputTokens(claudeResponse),
-      claudeResponse.outputTokens,
-    ]
-  );
-
-  // Log API usage
-  await logApiUsage(
-    userId,
-    claudeResponse.model,
-    taskType,
-    claudeResponse.inputTokens,
-    claudeResponse.outputTokens,
-    claudeResponse.cache
-  );
-
-  // Check ethics violations
-  if (checkEthicsViolation(claudeResponse.content)) {
-    await logEthicsBoundary(userId, sessionId, content, claudeResponse.content);
-  }
+  };
 }
 
 /**

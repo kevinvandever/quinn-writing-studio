@@ -15,8 +15,9 @@
  *   {{trash_word:t}}           the same, for a document in Trash ({{trash_piece:t}}, {{trash_piece_short:t}})
  *   {{absent_topic:x}}         a topic that appears nowhere in the writer's files
  *   {{earmarked_piece}}        a piece reserved for journal submission
- *   {{old_session_word:s}}     a word the writer used in one older session (beyond Session Memory)
- *   {{old_session_date:s}}     that session's date
+ *   {{old_session_word:s}}     a word the writer used in a short message in one session older than
+ *                              Session Memory, found nowhere else (other sessions, their files, Quinn's notes)
+ *   {{old_session_date:s}}     that session's date ({{old_session_month:s}}: its month and year)
  *
  * The same slot name always picks the same thing from the same binder. A case
  * whose placeholders can't be filled (nothing earmarked, say) is skipped.

@@ -13,6 +13,7 @@
  * "quality_check" feature area, so it shows in Settings → Usage.
  */
 import { randomUUID } from 'crypto';
+import type Anthropic from '@anthropic-ai/sdk';
 import { query } from '../db/connection.js';
 import { buildTurnRequest } from './coaching.service.js';
 import { calculateCost, logApiUsage } from './usage-tracking.service.js';
@@ -162,15 +163,35 @@ const ABSENT_TOPICS: Array<{ topic: string; words: string[] }> = [
 // ─── Placeholders ────────────────────────────────────────────────────────────
 
 const PLACEHOLDER = /\{\{([a-z_]+)(?::([a-z0-9-]+))?\}\}/g;
+/** Longer writer messages are usually pasted pieces, not conversation. */
+const OLD_MESSAGE_MAX_CHARS = 1_500;
+
+interface SessionWords {
+  id: string;
+  projectId: string;
+  startedAt: Date;
+  ended: boolean;
+  words: Set<string>;
+}
+
+interface OldSessionPick {
+  word: string;
+  sessionId: string;
+  /** created_at of the writer's message the word is from. */
+  messageAt: Date;
+  date: string;
+  month: string;
+}
 
 /** Fills {{placeholders}} from the writer's files; see quality-check.schema.ts for the list. */
 class Resolver {
   readonly values: Record<string, string> = {};
   private readonly picks = new Map<string, unknown>();
-  private sessionsCache: Array<{ id: string; started_at: Date; words: Set<string>; text: string }> | null = null;
+  private sessionsCache: SessionWords[] | null = null;
 
   constructor(
     private readonly material: Material,
+    private readonly userId: string,
     private readonly projectId: string
   ) {}
 
@@ -214,58 +235,78 @@ class Resolver {
     });
   }
 
-  /** Ended sessions of this project, newest first, with the words used in each. */
-  private async sessions(): Promise<Array<{ id: string; started_at: Date; words: Set<string>; text: string }>> {
+  /** Every session of the writer's, in every project, with the words used in it. Newest first. */
+  private async sessions(): Promise<SessionWords[]> {
     if (this.sessionsCache) return this.sessionsCache;
-    const rows = await query<{ id: string; started_at: Date; text: string }>(
-      `SELECT s.id, s.started_at,
+    const rows = await query<{ id: string; project_id: string; started_at: Date; ended_at: Date | null; text: string | null }>(
+      `SELECT s.id, s.project_id, s.started_at, s.ended_at,
               string_agg(m.content, E'\n' ORDER BY m.created_at) FILTER (WHERE m.role IN ('user', 'assistant')) AS text
-       FROM sessions s JOIN messages m ON m.session_id = s.id
-       WHERE s.project_id = $1 AND s.ended_at IS NOT NULL
+       FROM sessions s
+       JOIN projects p ON p.id = s.project_id
+       LEFT JOIN messages m ON m.session_id = s.id
+       WHERE p.user_id = $1
        GROUP BY s.id
-       ORDER BY s.ended_at DESC, s.id`,
-      [this.projectId]
+       ORDER BY s.ended_at DESC NULLS FIRST, s.started_at DESC, s.id`,
+      [this.userId]
     );
-    this.sessionsCache = rows.rows
-      .filter((r) => r.text)
-      .map((r) => ({ id: r.id, started_at: r.started_at, text: r.text, words: new Set(wordsOf(r.text)) }));
+    this.sessionsCache = rows.rows.map((r) => ({
+      id: r.id,
+      projectId: r.project_id,
+      startedAt: r.started_at,
+      ended: r.ended_at !== null,
+      words: new Set(wordsOf(r.text ?? '')),
+    }));
     return this.sessionsCache;
   }
 
-  /** A word the writer used in exactly one session older than Session Memory, and that Quinn's notes don't contain. */
-  private async oldSession(slot: string): Promise<{ word: string; date: string; sessionId: string }> {
+  /**
+   * Something the writer brought up in a conversation older than Session
+   * Memory: a word from one of their own short messages (not a pasted essay)
+   * that appears in no other session in any project, nowhere in their files,
+   * and nowhere in what Quinn has in front of her (recent sessions, their
+   * summaries, her notebook). Finding it takes search_conversations.
+   */
+  private async oldSession(slot: string): Promise<OldSessionPick> {
     return this.remember(`session:${slot}`, async () => {
-      const sessions = await this.sessions();
-      const older = sessions.slice(SESSION_MEMORY_COUNT);
+      const all = await this.sessions();
+      const ended = all.filter((s) => s.ended && s.projectId === this.projectId);
+      const older = ended.slice(SESSION_MEMORY_COUNT);
       if (older.length === 0) throw new SkipCase(`there are no sessions older than the ${SESSION_MEMORY_COUNT} in Session Memory`);
       const known = new Set<string>();
-      for (const s of sessions.slice(0, SESSION_MEMORY_COUNT)) for (const w of s.words) known.add(w);
+      for (const s of ended.slice(0, SESSION_MEMORY_COUNT)) for (const w of s.words) known.add(w);
       const summaries = await query<{ text: string }>(
         `SELECT coalesce(summary, '') || ' ' || coalesce(next_steps, '') AS text FROM sessions
-         WHERE project_id = $1 AND ended_at IS NOT NULL ORDER BY started_at DESC LIMIT $2`,
+         WHERE project_id = $1 AND ended_at IS NOT NULL ORDER BY ended_at DESC LIMIT $2`,
         [this.projectId, SESSION_MEMORY_COUNT]
       );
       for (const r of summaries.rows) for (const w of wordsOf(r.text)) known.add(w);
-      const notebook = renderNotebookForPrompt(await loadNotebook(this.projectId), null) ?? '';
-      for (const w of wordsOf(notebook)) known.add(w);
-      const candidates: Array<{ word: string; date: string; sessionId: string }> = [];
+      for (const w of wordsOf(renderNotebookForPrompt(await loadNotebook(this.projectId), null) ?? '')) known.add(w);
+      for (const value of this.material.text.values()) for (const w of wordsOf(value)) known.add(w);
+
+      const candidates: OldSessionPick[] = [];
       for (const s of older) {
-        const writerText = (
-          await query<{ text: string }>(
-            `SELECT coalesce(string_agg(content, E'\n'), '') AS text FROM messages
-             WHERE session_id = $1 AND role = 'user' AND left(btrim(content), 1) <> '/'`,
-            [s.id]
-          )
-        ).rows[0]?.text ?? '';
-        for (const w of new Set(wordsOf(writerText))) {
-          const inOtherSessions = sessions.some((o) => o.id !== s.id && o.words.has(w));
-          if (!inOtherSessions && !known.has(w)) {
-            candidates.push({ word: w, date: formatWriterShortDate(s.started_at), sessionId: s.id });
+        const messages = await query<{ content: string; created_at: Date }>(
+          `SELECT content, created_at FROM messages
+           WHERE session_id = $1 AND role = 'user' AND length(content) <= $2 AND left(btrim(content), 1) <> '/'
+           ORDER BY created_at, id`,
+          [s.id, OLD_MESSAGE_MAX_CHARS]
+        );
+        for (const m of messages.rows) {
+          for (const w of new Set(wordsOf(m.content))) {
+            if (known.has(w) || all.some((o) => o.id !== s.id && o.words.has(w))) continue;
+            candidates.push({
+              word: w,
+              sessionId: s.id,
+              messageAt: m.created_at,
+              date: formatWriterShortDate(s.startedAt),
+              month: s.startedAt.toLocaleDateString('en-US', { month: 'long', year: 'numeric', timeZone: 'UTC' }),
+            });
           }
         }
       }
-      const chosen = pick(candidates.sort((a, b) => a.word.localeCompare(b.word)), `session:${slot}`);
-      if (!chosen) throw new SkipCase('no older session has a word unique to it');
+      const unique = [...new Map(candidates.map((c) => [c.word, c])).values()].sort((a, b) => a.word.localeCompare(b.word));
+      const chosen = pick(unique, `session:${slot}`);
+      if (!chosen) throw new SkipCase('no older session has a word of the writer\'s that appears nowhere else');
       return chosen;
     });
   }
@@ -319,6 +360,8 @@ class Resolver {
         return this.record(kind, slot, (await this.oldSession(slot)).word);
       case 'old_session_date':
         return this.record(kind, slot, (await this.oldSession(slot)).date);
+      case 'old_session_month':
+        return this.record(kind, slot, (await this.oldSession(slot)).month);
       default:
         throw new Error(`Unknown placeholder {{${kind}${slot ? `:${slot}` : ''}}}`);
     }
@@ -345,14 +388,30 @@ class Resolver {
         )
       ).rows[0];
       if (!row?.summary) throw new SkipCase('there is no ended session with a summary');
-      return `<reference title="Summary of the last session (${formatWriterShortDate(row.started_at)})">\n${row.summary}\n\nWhat was next: ${row.next_steps || '(nothing recorded)'}\n</reference>`;
+      // Quinn also draws on her notebook, so the grader gets it too.
+      const notebook = renderNotebookForPrompt(await loadNotebook(this.projectId), null);
+      return [
+        `<reference title="Summary of the last session (${formatWriterShortDate(row.started_at)})">\n${row.summary}\n\nWhat was next: ${row.next_steps || '(nothing recorded)'}\n</reference>`,
+        notebook ? `<reference title="Quinn's notebook, which she also has">\n${notebook.slice(0, 12_000)}\n</reference>` : '',
+      ]
+        .filter(Boolean)
+        .join('\n\n');
     }
     if ('oldConversation' in ref) {
       await this.fill(ref.oldConversation);
       const slot = (ref.oldConversation.match(/\{\{old_session_word:([a-z0-9-]+)\}\}/) ?? [])[1] ?? '';
-      const { sessionId, date } = await this.oldSession(slot);
-      const session = (await this.sessions()).find((s) => s.id === sessionId);
-      return `<reference title="The conversation of ${date}">\n${(session?.text ?? '').slice(0, 12_000)}\n</reference>`;
+      const { sessionId, messageAt, date } = await this.oldSession(slot);
+      // The exchange around the writer's message, not the whole session.
+      const rows = await query<{ role: string; content: string; created_at: Date }>(
+        `SELECT role, content, created_at FROM messages
+         WHERE session_id = $1 AND role IN ('user', 'assistant')
+         ORDER BY created_at, id`,
+        [sessionId]
+      );
+      const at = rows.rows.findIndex((r) => r.role === 'user' && r.created_at.getTime() === messageAt.getTime());
+      const window = rows.rows.slice(Math.max(0, at - 2), at + 4);
+      const lines = window.map((r) => `${r.role === 'user' ? 'Writer' : 'Quinn'}: ${r.content.length > 2_500 ? `${r.content.slice(0, 2_500)} …` : r.content}`);
+      return `<reference title="Part of the conversation of ${date}">\n${lines.join('\n\n')}\n</reference>`;
     }
     const rows = await query<{ title: string }>(
       `SELECT title FROM corpus_documents
@@ -422,12 +481,26 @@ function runChecks(
 
 const JUDGE_SYSTEM = `You grade one test conversation with Quinn, an AI writing coach for a memoir and essay writer. Quinn coaches, questions, and analyzes; the writer writes every word, so Quinn must never write prose for him.
 
-You get the test's criteria, reference material from the writer's own files, the conversation, and the lookups Quinn made with her tools. Judge each criterion strictly and on its own. A claim about the writer's writing or past conversations that the reference contradicts, or doesn't support, fails any criterion about accuracy. Don't reward length or polish. Where a criterion doesn't apply to what happened, judge whether the reply is consistent with its spirit.
+You get the test's criteria, reference material from the writer's own files, what the app told Quinn on this turn (the date, recent activity), the conversation, and the lookups Quinn made with her tools. Judge each criterion strictly and on its own. Don't reward length or polish. Where a criterion doesn't apply to what happened, judge whether the reply is consistent with its spirit.
+
+On accuracy: Quinn knows more than you can see. She has the whole manuscript, a map of the binder, her notebook, summaries of recent sessions, and her tools, while you have only the reference material. So a detail fails an accuracy criterion when the reference contradicts it, or when it is about exactly what the reference covers and the reference doesn't contain it (for example, a line she says is in the ending that isn't in the ending you were given). A detail you simply can't check is not invented. Simple inferences, like how many days ago a dated session was, are fine.
 
 Then score Quinn's coaching in this conversation from 1 to 5: 5 is what an excellent human writing coach who had read everything would have said; 3 is acceptable but generic or partly off; 1 is wrong, harmful, or broke her rules.
 
 Reply with only JSON, no other text:
 {"criteria": [{"criterion": "<copied exactly>", "pass": true, "reason": "<one sentence>"}], "score": 4, "summary": "<one or two sentences on the reply as a whole>"}`;
+
+/** The per-turn context block the app attached to the writer's newest message, without its wrapper. */
+function turnContextOf(messages: Anthropic.Messages.MessageParam[]): string {
+  const last = messages.at(-1);
+  if (!last || typeof last.content === 'string') return '';
+  const block = last.content.find((b) => b.type === 'text' && b.text.startsWith('<turn_context>'));
+  if (!block || block.type !== 'text') return '';
+  return block.text
+    .replace(/^<turn_context>\n[^\n]*\n\n/, '')
+    .replace(/\n<\/turn_context>$/, '')
+    .slice(0, 8_000);
+}
 
 function extractJSON(content: string): string {
   const fenced = content.match(/```(?:json)?\s*\n?([\s\S]*?)\n?```/);
@@ -440,6 +513,7 @@ async function judge(
   testCase: QualityCase,
   rubric: string[],
   references: string[],
+  turnContext: string,
   transcript: CaseResult['transcript'],
   toolCalls: CaseResult['toolCalls']
 ): Promise<{ result: JudgeResult; response: ClaudeResponse }> {
@@ -451,6 +525,7 @@ async function judge(
     `Test: ${testCase.title}\nWhat it checks: ${testCase.checks}`,
     `Criteria:\n${rubric.map((c, i) => `${i + 1}. ${c}`).join('\n')}`,
     `Reference material:\n${references.length > 0 ? references.join('\n\n') : '(none)'}`,
+    `What the app told Quinn on her last reply:\n${turnContext || '(nothing)'}`,
     `Conversation:\n${transcript.map((t) => `${t.role === 'writer' ? 'Writer' : 'Quinn'}: ${t.text}`).join('\n\n')}`,
     `Quinn's lookups:\n${lookups}`,
   ].join('\n\n---\n\n');
@@ -534,7 +609,7 @@ export async function runQualityCase(userId: string, projectId: string, input: u
     await logApiUsage(userId, response.model, 'quality_check', response.inputTokens, response.outputTokens, response.cache);
   };
 
-  const resolver = new Resolver(await loadMaterial(userId, projectId), projectId);
+  const resolver = new Resolver(await loadMaterial(userId, projectId), userId, projectId);
   try {
     const turns: string[] = [];
     for (const t of testCase.turns) turns.push(await resolver.fill(t));
@@ -560,6 +635,7 @@ export async function runQualityCase(userId: string, projectId: string, input: u
     const sessionStartedAt = new Date();
     const history: Array<{ role: 'user' | 'assistant'; content: string; model_used: string | null; created_at: Date }> = [];
     const replies: string[] = [];
+    let lastTurnContext = '';
     for (let i = 0; i < turns.length; i++) {
       const content = turns[i]!;
       history.push({ role: 'user', content, model_used: null, created_at: new Date() });
@@ -580,6 +656,7 @@ export async function runQualityCase(userId: string, projectId: string, input: u
       });
       result.model = request.model;
       result.effort = request.effort;
+      lastTurnContext = turnContextOf(request.messages);
       const reply = await runModelTurn({
         systemPrompt: request.system,
         messages: request.messages,
@@ -601,7 +678,7 @@ export async function runQualityCase(userId: string, projectId: string, input: u
 
     result.results = runChecks(expect, replies, result.toolCalls.map((c) => c.name));
     if (rubric.length > 0) {
-      const graded = await judge(testCase, rubric, references, result.transcript, result.toolCalls);
+      const graded = await judge(testCase, rubric, references, lastTurnContext, result.transcript, result.toolCalls);
       await account(graded.response);
       result.judge = graded.result;
     }

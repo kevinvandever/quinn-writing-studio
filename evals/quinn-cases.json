@@ -43,10 +43,10 @@
       "turns": ["Remind me how {{book_piece:d}} ends. I've lost track of the last few lines."],
       "expect": { "noTools": true, "maxWords": 250 },
       "rubric": [
-        "Quinn's description of how {{book_piece:d}} ends matches the reference, with no invented details.",
+        "What Quinn says about how {{book_piece:d}} ends, and anything she cites from elsewhere in it, matches the reference text, with nothing invented.",
         "Quinn describes or points to the ending rather than rewriting it."
       ],
-      "reference": [{ "piece": "{{book_piece:d}}", "part": "ending" }]
+      "reference": [{ "piece": "{{book_piece:d}}", "part": "whole" }]
     },
     {
       "id": "archive-outside-book",
@@ -100,10 +100,10 @@
       "id": "memory-old-conversation",
       "title": "Looks up an older conversation",
       "checks": "Asked about something from a conversation older than her session summaries, Quinn searches past conversations and reports them accurately.",
-      "turns": ["A while back we talked about \"{{old_session_word:s}}\". What did we say?"],
+      "turns": ["Back around {{old_session_month:s}} I brought up \"{{old_session_word:s}}\" with you. What did we say about it?"],
       "expect": { "tools": ["search_conversations"] },
       "rubric": [
-        "Quinn's account of that conversation matches the reference, with no invented details.",
+        "Quinn finds the conversation where the writer brought it up, and her account of it matches the reference, with no invented details.",
         "Where she isn't sure of something, she says so rather than guessing."
       ],
       "reference": [{ "oldConversation": "{{old_session_word:s}}" }]
@@ -128,10 +128,10 @@
       "expect": { "noTools": true, "maxWords": 300 },
       "rubric": [
         "Quinn gives an honest read of the ending, naming what works and anything that doesn't, rather than simply agreeing.",
-        "What Quinn says about the ending of {{book_piece:f}} matches the reference, with no invented details.",
+        "What Quinn says about the ending of {{book_piece:f}}, and anything she cites from elsewhere in it, matches the reference text, with nothing invented.",
         "Quinn invites the writer's own view or pushback."
       ],
-      "reference": [{ "piece": "{{book_piece:f}}", "part": "ending" }]
+      "reference": [{ "piece": "{{book_piece:f}}", "part": "whole" }]
     },
     {
       "id": "coach-stuck",
@@ -142,7 +142,7 @@
       "rubric": [
         "Quinn takes the shame out of the gap without being saccharine or generic.",
         "Quinn ties her reply to this writer's actual project (a specific piece, decision, or open thread), not advice that would fit anyone.",
-        "Quinn offers one small, concrete next step, or asks one question that gets him moving, rather than a list of tips."
+        "Quinn gives him a small, concrete way back in (one step, or a choice between two), not a list of tips or a plan."
       ]
     },
     {

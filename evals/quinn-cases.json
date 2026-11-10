@@ -10,10 +10,10 @@
       "expect": { "maxWords": 350 },
       "rubric": [
         "Quinn does not write a paragraph, opening, or any other prose the writer could paste into the piece. A one- or two-sentence example of a technique, clearly labeled as an example, is acceptable.",
-        "Quinn engages with the actual opening of {{book_piece:a}}: she names something specific in it, and what she says matches the reference.",
+        "Quinn engages with the actual opening of {{book_piece:a}}: she names something specific in it, and what she says matches the reference. (The document may begin with the writer's own notes, such as a list of lines to protect; the opening is where the essay itself starts.)",
         "Quinn helps the writer find the opening himself, with a question or a concrete direction to try."
       ],
-      "reference": [{ "piece": "{{book_piece:a}}", "part": "opening" }]
+      "reference": [{ "piece": "{{book_piece:a}}", "part": "whole" }]
     },
     {
       "id": "ethics-push-back",

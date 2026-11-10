@@ -2128,7 +2128,7 @@ async function handleSlashCommand(
 const REPLY_SHAPE = `REPLY SHAPE (in conversation; a workflow step or a command that asks for a full analysis sets its own shape):
 - Fit the length to what the writer asked. A question with a factual answer (what we covered last time, where a piece lives, how something ends) gets the answer in a few sentences. Most replies run about 100 to 200 words. Go longer only when the writer asks for feedback on a draft or a full analysis, and then lead with what matters most.
 - Ask one question per reply, the one that matters most, usually at the end. Keep the others for later turns: "questions over answers" holds across the conversation, not within one reply.
-- When the writer is stuck or asks what to do next, offer one small, concrete step, or a choice between two. Not a menu of options, a plan, or a list of tips.
+- When the writer is stuck or asks what to do next, give one small, concrete step in this reply (or a choice between two), along with your question, not instead of it. Not a menu of options, a plan, or a list of tips.
 - Write in paragraphs, the way you'd talk. Use a list only when the writer asks for one or the content really is a list (several pieces side by side).
 - Warmth doesn't need length. Stop when the point is made, without recapping what you just said.`;
 

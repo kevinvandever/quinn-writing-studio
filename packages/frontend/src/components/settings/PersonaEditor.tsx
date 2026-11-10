@@ -1,10 +1,27 @@
 import { useState, useEffect, useCallback } from 'react';
-import { get, put, post } from '../../services/api-client';
+import { get, put, post, del } from '../../services/api-client';
 
 interface ValidationError {
   path: string;
   message: string;
 }
+
+/** A real exchange Quinn sees as an example of how to sound (config.voice.example_exchanges). */
+interface VoiceExample {
+  writer: string;
+  quinn: string;
+  from?: string;
+}
+
+const MAX_VOICE_EXAMPLES = 6;
+
+function examplesOf(config: unknown): VoiceExample[] {
+  const list = (config as { voice?: { example_exchanges?: unknown } } | null)?.voice?.example_exchanges;
+  return Array.isArray(list) ? (list as VoiceExample[]) : [];
+}
+
+const clip = (text: string, max: number): string =>
+  text.length > max ? `${text.slice(0, max).trimEnd()}…` : text;
 
 interface PersonaResponse {
   persona: {
@@ -42,6 +59,9 @@ export function PersonaEditor() {
   const [errors, setErrors] = useState<ValidationError[]>([]);
   const [successMessage, setSuccessMessage] = useState('');
   const [parseError, setParseError] = useState('');
+  const [examples, setExamples] = useState<VoiceExample[]>([]);
+  const [removing, setRemoving] = useState<number | null>(null);
+  const [examplesError, setExamplesError] = useState('');
 
   const loadPersona = useCallback(async () => {
     try {
@@ -52,11 +72,13 @@ export function PersonaEditor() {
       if (active) {
         setPersonaId(active.id);
         setConfigJson(JSON.stringify(active.config, null, 2));
+        setExamples(examplesOf(active.config));
       } else {
         const first = data.personas[0];
         if (first) {
           setPersonaId(first.id);
           setConfigJson(JSON.stringify(first.config, null, 2));
+          setExamples(examplesOf(first.config));
         }
       }
     } catch (err) {
@@ -129,6 +151,7 @@ export function PersonaEditor() {
       );
 
       setConfigJson(JSON.stringify(result.persona.config, null, 2));
+      setExamples(examplesOf(result.persona.config));
       setSuccessMessage('Persona configuration saved successfully');
     } catch (err: unknown) {
       if (err && typeof err === 'object' && 'details' in err) {
@@ -141,6 +164,20 @@ export function PersonaEditor() {
       }
     } finally {
       setSaving(false);
+    }
+  };
+
+  const removeExample = async (index: number) => {
+    try {
+      setRemoving(index);
+      setExamplesError('');
+      await del(`/api/personas/active/examples/${index}`);
+      // Reload so the JSON below matches what's saved.
+      await loadPersona();
+    } catch (err) {
+      setExamplesError(err instanceof Error ? err.message : "Couldn't remove that example.");
+    } finally {
+      setRemoving(null);
     }
   };
 
@@ -162,6 +199,48 @@ export function PersonaEditor() {
 
   return (
     <div className="space-y-4">
+      <div className="rounded-md border border-gray-200 p-4 space-y-3">
+        <div>
+          <h3 className="text-lg font-semibold text-gray-900">
+            Voice examples ({examples.length} of {MAX_VOICE_EXAMPLES})
+          </h3>
+          <p className="text-sm text-gray-500 mt-1">
+            Real exchanges Quinn sees as examples of how to sound. To add one, click "Keep as a
+            voice example" under one of her replies in a session.
+          </p>
+        </div>
+        {examplesError && <p className="text-sm text-red-700">{examplesError}</p>}
+        {examples.length === 0 ? (
+          <p className="text-sm text-gray-500 italic">None yet.</p>
+        ) : (
+          <ul className="space-y-3">
+            {examples.map((example, i) => (
+              <li key={i} className="rounded-md bg-gray-50 border border-gray-200 p-3">
+                <div className="flex items-start justify-between gap-3">
+                  <div className="space-y-1 text-sm">
+                    {example.from && <p className="text-xs text-gray-500">{example.from}</p>}
+                    <p className="text-gray-600">
+                      <span className="font-medium">You:</span>{' '}
+                      {example.writer ? clip(example.writer, 200) : <em>(Quinn opened the session)</em>}
+                    </p>
+                    <p className="text-gray-900 whitespace-pre-wrap">
+                      <span className="font-medium">Quinn:</span> {clip(example.quinn, 400)}
+                    </p>
+                  </div>
+                  <button
+                    onClick={() => removeExample(i)}
+                    disabled={removing !== null}
+                    className="text-sm text-red-500 hover:text-red-700 disabled:opacity-50 flex-shrink-0"
+                  >
+                    {removing === i ? 'Removing…' : 'Remove'}
+                  </button>
+                </div>
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+
       <div className="flex items-center justify-between">
         <h3 className="text-lg font-semibold text-gray-900">
           Persona Configuration

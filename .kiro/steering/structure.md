@@ -113,11 +113,10 @@ An earlier audit resolved three: `intelligence/IntelligenceFeed.tsx` and
 `layout/ProjectSwitcher.tsx` were deleted, and `settings/UsageDashboard.tsx` was
 wired into `settings/SettingsPanel.tsx` against the new `/api/usage` endpoint.
 
-Still orphaned (found November 2026): `drafts/DraftVersions.tsx`, a full version
-list and diff viewer over `/api/documents/:id/snapshots`. Nothing imports it; the
-`/projects/:id/drafts/:docId` route renders `pages/DraftVersions.tsx`, a "coming
-soon" placeholder. Draft versions (including Scrivener snapshots) exist in the
-backend but have no UI yet.
+`drafts/DraftVersions.tsx` (the version list and side-by-side comparison) was
+orphaned until November 2026. It is now rendered by `pages/DraftVersions.tsx` for
+`/projects/:id/drafts/:docId`, reached from the "Versions" link on a document in
+the corpus browser.
 
 Before editing a component, confirm something imports it:
 ```bash

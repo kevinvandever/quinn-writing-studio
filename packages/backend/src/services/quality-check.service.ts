@@ -563,8 +563,9 @@ async function judge(
   knowledge: string,
   turnContext: string,
   transcript: CaseResult['transcript'],
-  toolCalls: CaseResult['toolCalls']
-): Promise<{ result: JudgeResult; response: ClaudeResponse }> {
+  toolCalls: CaseResult['toolCalls'],
+  account: (response: ClaudeResponse) => Promise<void>
+): Promise<JudgeResult> {
   const lookups =
     toolCalls.length > 0
       ? toolCalls.map((c) => `- reply ${c.turn}: ${c.name} ${JSON.stringify(c.input)} (${c.resultChars} characters back${c.isError ? ', an error' : ''})`).join('\n')
@@ -578,35 +579,41 @@ async function judge(
     `Conversation:\n${transcript.map((t) => `${t.role === 'writer' ? 'Writer' : 'Quinn'}: ${t.text}`).join('\n\n')}`,
     `Quinn's lookups:\n${lookups}`,
   ].join('\n\n---\n\n');
-  const response = await sendMessage({
-    systemPrompt: JUDGE_SYSTEM,
-    messages: [{ role: 'user', content }],
-    model: 'sonnet',
-    effort: 'medium',
-    maxTokens: 6000,
-  });
-  let parsed: { criteria?: Array<{ pass?: unknown; reason?: unknown }>; score?: unknown; summary?: unknown };
-  try {
-    parsed = JSON.parse(extractJSON(response.content));
-  } catch {
-    throw new Error(`the grader's reply wasn't JSON: ${response.content.slice(0, 200)}`);
+  // The grader occasionally returns broken JSON (an unescaped quote, or a reply
+  // cut short); one more try usually fixes it. Every attempt is paid for.
+  let parsed: { criteria?: Array<{ pass?: unknown; reason?: unknown }>; score?: unknown; summary?: unknown } | null = null;
+  for (let attempt = 1; !parsed; attempt++) {
+    const response = await sendMessage({
+      systemPrompt: JUDGE_SYSTEM,
+      messages: [{ role: 'user', content }],
+      model: 'sonnet',
+      effort: 'medium',
+      maxTokens: 8000,
+    });
+    await account(response);
+    try {
+      parsed = JSON.parse(extractJSON(response.content));
+    } catch {
+      if (attempt >= 2) {
+        throw new Error(
+          `the grader's reply wasn't JSON, twice (${response.content.length} characters, ${response.outputTokens} output tokens; it ended "…${response.content.slice(-80)}")`
+        );
+      }
+    }
   }
   const graded = Array.isArray(parsed.criteria) ? parsed.criteria : [];
   const score = typeof parsed.score === 'number' && parsed.score >= 1 && parsed.score <= 5 ? Math.round(parsed.score) : null;
   return {
-    response,
-    result: {
-      score,
-      summary: typeof parsed.summary === 'string' ? parsed.summary : '',
-      criteria: rubric.map((criterion, i) => {
-        const g = graded[i];
-        return {
-          criterion,
-          pass: g?.pass === true,
-          reason: typeof g?.reason === 'string' ? g.reason : 'The grader gave no verdict for this criterion.',
-        };
-      }),
-    },
+    score,
+    summary: typeof parsed.summary === 'string' ? parsed.summary : '',
+    criteria: rubric.map((criterion, i) => {
+      const g = graded[i];
+      return {
+        criterion,
+        pass: g?.pass === true,
+        reason: typeof g?.reason === 'string' ? g.reason : 'The grader gave no verdict for this criterion.',
+      };
+    }),
   };
 }
 
@@ -727,17 +734,16 @@ export async function runQualityCase(userId: string, projectId: string, input: u
 
     result.results = runChecks(expect, replies, result.toolCalls.map((c) => c.name));
     if (rubric.length > 0) {
-      const graded = await judge(
+      result.judge = await judge(
         testCase,
         rubric,
         references,
         await resolver.knowledge(),
         lastTurnContext,
         result.transcript,
-        result.toolCalls
+        result.toolCalls,
+        account
       );
-      await account(graded.response);
-      result.judge = graded.result;
     }
     const hardFailures = result.results.filter((r) => !r.pass && !r.soft).length;
     const criteriaFailures = result.judge?.criteria.filter((c) => !c.pass).length ?? 0;

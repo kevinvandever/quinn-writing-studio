@@ -12,6 +12,24 @@ export const identitySchema = z.object({
   partnership_signature: z.string().optional(),
 });
 
+/** Most voice examples Quinn keeps; each is in every prompt. */
+export const MAX_VOICE_EXAMPLES = 6;
+/** Longest Quinn reply accepted as an example (about 400 words). */
+export const MAX_EXAMPLE_REPLY_CHARS = 2_500;
+/** The writer's side of an example is shortened to this. */
+export const MAX_EXAMPLE_WRITER_CHARS = 800;
+
+/**
+ * A real exchange from the writer's sessions that shows how Quinn should
+ * sound. `writer` is empty when Quinn spoke first (a session opener).
+ */
+export const voiceExampleSchema = z.object({
+  writer: z.string().max(MAX_EXAMPLE_WRITER_CHARS + 10),
+  quinn: z.string().min(1).max(MAX_EXAMPLE_REPLY_CHARS),
+  /** When it was said, for the writer's reference (e.g. "Sep 2, 2026"). */
+  from: z.string().max(100).optional(),
+});
+
 export const voiceSchema = z.object({
   tone: z.string().min(1, 'Tone is required'),
   partnership_language: z
@@ -21,6 +39,7 @@ export const voiceSchema = z.object({
     .array(z.string().min(1))
     .min(1, 'At least one communication pattern is required'),
   the_edge_does_what: z.array(z.string().min(1)).optional(),
+  example_exchanges: z.array(voiceExampleSchema).max(MAX_VOICE_EXAMPLES).optional(),
 });
 
 export const editorialPhilosophySchema = z.object({
@@ -79,6 +98,7 @@ export const personaConfigSchema = z.object({
 export type PersonaConfig = z.infer<typeof personaConfigSchema>;
 export type Identity = z.infer<typeof identitySchema>;
 export type Voice = z.infer<typeof voiceSchema>;
+export type VoiceExample = z.infer<typeof voiceExampleSchema>;
 export type EditorialPhilosophy = z.infer<typeof editorialPhilosophySchema>;
 export type Expertise = z.infer<typeof expertiseSchema>;
 export type Ethics = z.infer<typeof ethicsSchema>;

@@ -8,29 +8,49 @@ interface Snapshot {
   word_count: number;
   trigger: string;
   created_at: string;
+  /** Set for snapshots that came from Scrivener ('Untitled Snapshot' when unnamed). */
+  scrivener_title?: string | null;
 }
 
 interface SnapshotContent {
   id: string;
   content: string;
   word_count: number;
-  created_at: string;
+  /** Null for the current text. */
+  created_at: string | null;
 }
 
-interface DiffResponse {
-  diff: {
-    snapshotA: SnapshotContent;
-    snapshotB: SnapshotContent;
-    wordCountDelta: number;
-  };
+interface DiffData {
+  snapshotA: SnapshotContent;
+  snapshotB: SnapshotContent;
+  wordCountDelta: number;
 }
 
 interface DraftVersionsProps {
   documentId: string;
   documentTitle?: string;
+  /** The piece's text as of the last sync, offered as a version to compare with. */
+  currentText?: string;
+  currentWords?: number;
 }
 
-export function DraftVersions({ documentId, documentTitle }: DraftVersionsProps) {
+/** Selection id for the current text. */
+const CURRENT = 'current';
+
+/** Where a version came from, in words. */
+function kindOf(snapshot: Snapshot): string {
+  if (snapshot.trigger === 'pre_import_update') return 'The text before a sync changed it';
+  if (snapshot.trigger === 'manual') {
+    if (!snapshot.scrivener_title) return 'Saved in the app';
+    return snapshot.scrivener_title === 'Untitled Snapshot'
+      ? 'Scrivener snapshot'
+      : `Scrivener snapshot: “${snapshot.scrivener_title}”`;
+  }
+  return snapshot.trigger.replace(/_/g, ' ');
+}
+
+export function DraftVersions({ documentId, documentTitle, currentText, currentWords }: DraftVersionsProps) {
+  const hasCurrent = typeof currentText === 'string' && currentText.trim() !== '';
   const [snapshots, setSnapshots] = useState<Snapshot[]>([]);
   const [loading, setLoading] = useState(true);
   const [creating, setCreating] = useState(false);
@@ -39,7 +59,7 @@ export function DraftVersions({ documentId, documentTitle }: DraftVersionsProps)
   // Diff comparison state
   const [selectedA, setSelectedA] = useState<string | null>(null);
   const [selectedB, setSelectedB] = useState<string | null>(null);
-  const [diffData, setDiffData] = useState<DiffResponse['diff'] | null>(null);
+  const [diffData, setDiffData] = useState<DiffData | null>(null);
   const [diffSegments, setDiffSegments] = useState<DiffSegment[]>([]);
   const [comparing, setComparing] = useState(false);
 
@@ -50,6 +70,12 @@ export function DraftVersions({ documentId, documentTitle }: DraftVersionsProps)
         `/api/documents/${documentId}/snapshots`
       );
       setSnapshots(result.snapshots);
+      // Ready to compare the newest version with the current text.
+      const newest = result.snapshots[0];
+      if (newest && hasCurrent) {
+        setSelectedA((a) => a ?? newest.id);
+        setSelectedB((b) => b ?? CURRENT);
+      }
       setError(null);
     } catch (err) {
       setError('Failed to load snapshots');
@@ -57,7 +83,7 @@ export function DraftVersions({ documentId, documentTitle }: DraftVersionsProps)
     } finally {
       setLoading(false);
     }
-  }, [documentId]);
+  }, [documentId, hasCurrent]);
 
   useEffect(() => {
     loadSnapshots();
@@ -90,25 +116,29 @@ export function DraftVersions({ documentId, documentTitle }: DraftVersionsProps)
     }
   };
 
+  const versionOf = async (id: string): Promise<SnapshotContent> =>
+    id === CURRENT
+      ? { id, content: currentText ?? '', word_count: currentWords ?? 0, created_at: null }
+      : (await get<{ snapshot: SnapshotContent }>(`/api/snapshots/${id}`)).snapshot;
+
   const compareDiff = async () => {
     if (!selectedA || !selectedB) return;
 
     try {
       setComparing(true);
-      const result = await get<DiffResponse>(
-        `/api/documents/${documentId}/snapshots/diff?a=${selectedA}&b=${selectedB}`
-      );
-      setDiffData(result.diff);
-      setDiffSegments(
-        computeWordDiff(result.diff.snapshotA.content, result.diff.snapshotB.content)
-      );
+      const [a, b] = await Promise.all([versionOf(selectedA), versionOf(selectedB)]);
+      setDiffData({ snapshotA: a, snapshotB: b, wordCountDelta: (b.word_count || 0) - (a.word_count || 0) });
+      setDiffSegments(computeWordDiff(a.content, b.content));
     } catch (err) {
-      setError('Failed to compare snapshots');
+      setError('Failed to compare versions');
       console.error(err);
     } finally {
       setComparing(false);
     }
   };
+
+  const versionLabel = (version: SnapshotContent): string =>
+    version.created_at ? formatDate(version.created_at) : 'Current text';
 
   const formatDate = (dateStr: string) => {
     return new Date(dateStr).toLocaleString(undefined, {
@@ -145,7 +175,7 @@ export function DraftVersions({ documentId, documentTitle }: DraftVersionsProps)
           disabled={creating}
           className="inline-flex items-center px-4 py-2 bg-indigo-600 text-white text-sm font-medium rounded-lg hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
         >
-          {creating ? 'Creating...' : '+ Create Snapshot'}
+          {creating ? 'Saving...' : '+ Save the current text as a version'}
         </button>
       </div>
 
@@ -158,9 +188,10 @@ export function DraftVersions({ documentId, documentTitle }: DraftVersionsProps)
       {/* Snapshot List */}
       {snapshots.length === 0 ? (
         <div className="text-center py-8 bg-gray-50 rounded-lg border border-gray-200">
-          <p className="text-gray-500">No snapshots yet.</p>
+          <p className="text-gray-500">No earlier versions yet.</p>
           <p className="text-sm text-gray-400 mt-1">
-            Create a snapshot to save the current state of this document.
+            Snapshots you take in Scrivener arrive with the next sync, and a sync that changes
+            this piece keeps the text it replaced. You can also save the current text here.
           </p>
         </div>
       ) : (
@@ -168,9 +199,43 @@ export function DraftVersions({ documentId, documentTitle }: DraftVersionsProps)
           {/* Selection for comparison */}
           <div className="bg-gray-50 rounded-lg border border-gray-200 p-4">
             <p className="text-sm font-medium text-gray-700 mb-3">
-              Select two snapshots to compare:
+              Pick two versions to compare (A is shown as the earlier one):
             </p>
             <div className="space-y-2">
+              {hasCurrent && (
+                <div className="flex items-center justify-between bg-white rounded-md border border-gray-200 px-4 py-3">
+                  <div className="flex items-center gap-4">
+                    <div className="flex items-center gap-2">
+                      <label className="flex items-center gap-1 text-xs text-gray-500">
+                        <input
+                          type="radio"
+                          name="snapshotA"
+                          checked={selectedA === CURRENT}
+                          onChange={() => setSelectedA(CURRENT)}
+                          className="text-indigo-600"
+                        />
+                        A
+                      </label>
+                      <label className="flex items-center gap-1 text-xs text-gray-500">
+                        <input
+                          type="radio"
+                          name="snapshotB"
+                          checked={selectedB === CURRENT}
+                          onChange={() => setSelectedB(CURRENT)}
+                          className="text-indigo-600"
+                        />
+                        B
+                      </label>
+                    </div>
+                    <div>
+                      <p className="text-sm font-medium text-gray-900">Current text</p>
+                      <p className="text-xs text-gray-500">
+                        {(currentWords ?? 0).toLocaleString()} words • As of the last Scrivener sync
+                      </p>
+                    </div>
+                  </div>
+                </div>
+              )}
               {snapshots.map((snapshot) => (
                 <div
                   key={snapshot.id}
@@ -204,8 +269,7 @@ export function DraftVersions({ documentId, documentTitle }: DraftVersionsProps)
                         {formatDate(snapshot.created_at)}
                       </p>
                       <p className="text-xs text-gray-500">
-                        {snapshot.word_count?.toLocaleString() ?? 0} words •{' '}
-                        <span className="capitalize">{snapshot.trigger.replace('_', ' ')}</span>
+                        {snapshot.word_count?.toLocaleString() ?? 0} words • {kindOf(snapshot)}
                       </p>
                     </div>
                   </div>
@@ -225,7 +289,7 @@ export function DraftVersions({ documentId, documentTitle }: DraftVersionsProps)
               disabled={!selectedA || !selectedB || selectedA === selectedB || comparing}
               className="mt-3 inline-flex items-center px-4 py-2 bg-indigo-600 text-white text-sm font-medium rounded-lg hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
             >
-              {comparing ? 'Comparing...' : 'Compare Selected'}
+              {comparing ? 'Comparing...' : 'Compare'}
             </button>
           </div>
 
@@ -259,9 +323,9 @@ export function DraftVersions({ documentId, documentTitle }: DraftVersionsProps)
                 {/* Snapshot A (older) */}
                 <div className="p-4">
                   <p className="text-xs text-gray-500 mb-2 font-medium">
-                    Snapshot A — {formatDate(diffData.snapshotA.created_at)}
+                    A — {versionLabel(diffData.snapshotA)}
                   </p>
-                  <div className="text-sm leading-relaxed whitespace-pre-wrap font-mono">
+                  <div className="text-sm leading-relaxed whitespace-pre-wrap font-serif">
                     {diffSegments.map((segment, i) => {
                       if (segment.type === 'equal') {
                         return <span key={i}>{segment.text}</span>;
@@ -285,9 +349,9 @@ export function DraftVersions({ documentId, documentTitle }: DraftVersionsProps)
                 {/* Snapshot B (newer) */}
                 <div className="p-4">
                   <p className="text-xs text-gray-500 mb-2 font-medium">
-                    Snapshot B — {formatDate(diffData.snapshotB.created_at)}
+                    B — {versionLabel(diffData.snapshotB)}
                   </p>
-                  <div className="text-sm leading-relaxed whitespace-pre-wrap font-mono">
+                  <div className="text-sm leading-relaxed whitespace-pre-wrap font-serif">
                     {diffSegments.map((segment, i) => {
                       if (segment.type === 'equal') {
                         return <span key={i}>{segment.text}</span>;

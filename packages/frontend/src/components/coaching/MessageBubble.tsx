@@ -1,3 +1,5 @@
+import { useState } from 'react';
+
 // ─── Types ───────────────────────────────────────────────────────────────────
 
 interface Message {
@@ -12,13 +14,36 @@ interface Message {
 interface MessageBubbleProps {
   message: Message;
   isStreaming?: boolean;
+  /** Keep this reply as an example of Quinn's voice. Omit to hide the option. */
+  onKeepExample?: (message: Message) => Promise<void>;
 }
+
+/** Longest reply the server accepts as a voice example (about 400 words). */
+const MAX_EXAMPLE_CHARS = 2_500;
 
 // ─── Component ───────────────────────────────────────────────────────────────
 
-export function MessageBubble({ message, isStreaming = false }: MessageBubbleProps) {
+export function MessageBubble({ message, isStreaming = false, onKeepExample }: MessageBubbleProps) {
   const isUser = message.role === 'user';
   const isOpus = message.model_used === 'opus';
+  const [keep, setKeep] = useState<{ state: 'idle' | 'saving' | 'kept' | 'error'; note?: string }>({ state: 'idle' });
+  const canKeep =
+    !!onKeepExample &&
+    !isStreaming &&
+    message.model_reason !== 'Workflow command' &&
+    message.content.trim().length > 0 &&
+    message.content.trim().length <= MAX_EXAMPLE_CHARS;
+
+  const keepExample = async () => {
+    if (!onKeepExample) return;
+    setKeep({ state: 'saving' });
+    try {
+      await onKeepExample(message);
+      setKeep({ state: 'kept' });
+    } catch (err) {
+      setKeep({ state: 'error', note: err instanceof Error ? err.message : "Couldn't keep it." });
+    }
+  };
 
   const timestamp = new Date(message.created_at).toLocaleTimeString([], {
     hour: '2-digit',
@@ -79,7 +104,23 @@ export function MessageBubble({ message, isStreaming = false }: MessageBubblePro
               {message.model_used === 'opus' ? 'Opus' : 'Sonnet'}
             </span>
           )}
+          {canKeep && (
+            <button
+              type="button"
+              onClick={keepExample}
+              disabled={keep.state === 'saving' || keep.state === 'kept'}
+              title="Quinn sees a few of her best replies as examples of how to sound"
+              className="text-xs text-warm-400 hover:text-sage-700 disabled:hover:text-warm-400 disabled:cursor-default"
+            >
+              {keep.state === 'saving'
+                ? 'Keeping…'
+                : keep.state === 'kept'
+                  ? 'Kept as a voice example ✓'
+                  : 'Keep as a voice example'}
+            </button>
+          )}
         </div>
+        {keep.state === 'error' && <p className="text-xs text-red-600 mt-1">{keep.note}</p>}
       </div>
     </div>
   );

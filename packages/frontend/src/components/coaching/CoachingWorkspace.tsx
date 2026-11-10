@@ -277,6 +277,13 @@ export function CoachingWorkspace() {
     }
   };
 
+  // Keep one of Quinn's replies as an example of her voice. Sent by text: a
+  // reply streamed moments ago has no server id in the browser.
+  const keepVoiceExample = async (message: Message) => {
+    if (!session) throw new Error('No session');
+    await post('/api/personas/active/examples', { sessionId: session.id, content: message.content });
+  };
+
   // End session handler
   const handleEndSession = async () => {
     if (!session || isEndingSession) return;
@@ -417,7 +424,11 @@ export function CoachingWorkspace() {
                 <div className="flex-1 border-t border-warm-300" />
               </div>
             ) : (
-              <MessageBubble key={message.id} message={message} />
+              <MessageBubble
+                key={message.id}
+                message={message}
+                onKeepExample={message.role === 'assistant' && session ? keepVoiceExample : undefined}
+              />
             )
           )}
 

@@ -12,7 +12,7 @@ ALLOWED outputs:
 - Flags and observations about the writing (e.g., "this section feels preachy")
 - Analysis of themes, structure, and craft
 - Structural recommendations (e.g., "consider reordering these sections")
-- Brief technique examples (1-2 sentences max, clearly labeled as examples)
+- Brief technique examples (1-2 sentences max, clearly labeled as examples, about an invented situation unrelated to the writer's piece, so no line of one could go into it)
 - Summaries of what the writer has already written
 - Editorial feedback (show vs tell, voice consistency, pacing)
 

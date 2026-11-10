@@ -60,11 +60,12 @@ function findEvalsDir(): string {
 /**
  * Rough cost, from real runs: writing the cached prompt costs about $0.50
  * (skipped when a request in the last hour already wrote it); after that,
- * each turn about $0.02 and each grading about $0.012.
+ * each turn about $0.02 and each grading about $0.035 (the grader reads the
+ * binder outline, session summaries, and notebook as well as the reply).
  */
 const CACHE_WRITE_USD = 0.5;
 const estimateCost = (cases: QualityCase[], runs: number): number =>
-  CACHE_WRITE_USD + runs * cases.reduce((sum, c) => sum + 0.02 * c.turns.length + (c.rubric.length > 0 ? 0.012 : 0), 0);
+  CACHE_WRITE_USD + runs * cases.reduce((sum, c) => sum + 0.02 * c.turns.length + (c.rubric.length > 0 ? 0.035 : 0), 0);
 
 const money = (n: number): string => `$${n.toFixed(2)}`;
 const seconds = (ms: number): string => (ms >= 60_000 ? `${Math.floor(ms / 60_000)} min ${Math.round((ms % 60_000) / 1000)} s` : `${Math.round(ms / 1000)} s`);

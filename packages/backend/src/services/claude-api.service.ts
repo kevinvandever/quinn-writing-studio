@@ -954,6 +954,20 @@ function buildPersonaSection(personaConfig: Record<string, unknown>): string {
     }
   }
 
+  // Real exchanges teach the voice better than the descriptions above.
+  const examples = (voice?.['example_exchanges'] as Array<{ writer?: string; quinn?: string }> | undefined)?.filter(
+    (e) => typeof e?.quinn === 'string' && e.quinn.trim() !== ''
+  );
+  if (examples && examples.length > 0) {
+    lines.push(
+      `\nHow you sound with this writer: real exchanges from your sessions that went well. Match their register, length, and directness. They're past conversations, so don't repeat their lines or bring up their subjects unless the writer does.`,
+      ...examples.map(
+        (e) =>
+          `<example>\n${e.writer?.trim() ? `Writer: ${e.writer.trim()}` : '(You opened the session.)'}\nQuinn: ${(e.quinn ?? '').trim()}\n</example>`
+      )
+    );
+  }
+
   return lines.join('\n');
 }
 

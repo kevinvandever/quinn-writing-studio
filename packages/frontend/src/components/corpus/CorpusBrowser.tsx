@@ -1,5 +1,5 @@
 import { useState, useCallback, useRef, useEffect } from 'react';
-import { useParams } from 'react-router-dom';
+import { Link, useParams } from 'react-router-dom';
 import { get } from '../../services/api-client';
 
 const BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:3001';
@@ -295,6 +295,17 @@ export function CorpusBrowser() {
               {selectedDoc && (
                 <span className="text-xs text-gray-500">
                   {selectedDoc.word_count?.toLocaleString()} words
+                  {!selectedDoc.is_folder && projectId && (
+                    <>
+                      {' · '}
+                      <Link
+                        to={`/projects/${projectId}/drafts/${selectedDoc.id}`}
+                        className="text-indigo-600 hover:text-indigo-800"
+                      >
+                        Versions
+                      </Link>
+                    </>
+                  )}
                 </span>
               )}
             </div>

@@ -72,16 +72,20 @@ router.get('/documents/:id/snapshots', asyncHandler(async (req: Request, res: Re
   const userId = req.user!.userId;
   const documentId = req.params.id;
 
-  // Verify document exists and user owns the project
-  const docResult = await query<{ id: string }>(
-    `SELECT cd.id
+  // Verify document exists and user owns the project. The document's index of
+  // Scrivener snapshots ({ "<ISO time>": "<title>" }) names the ones from Scrivener.
+  const docResult = await query<{ id: string; snapshot_index: Record<string, string> }>(
+    `SELECT cd.id,
+            CASE WHEN jsonb_typeof(cd.metadata->'scrivenerSnapshots') = 'object'
+                 THEN cd.metadata->'scrivenerSnapshots' ELSE '{}'::jsonb END AS snapshot_index
      FROM corpus_documents cd
      JOIN projects p ON p.id = cd.project_id
      WHERE cd.id = $1 AND p.user_id = $2`,
     [documentId, userId]
   );
 
-  if (docResult.rows.length === 0) {
+  const doc = docResult.rows[0];
+  if (!doc) {
     throw new AppError(404, ErrorCodes.NOT_FOUND, 'Document not found');
   }
 
@@ -99,7 +103,12 @@ router.get('/documents/:id/snapshots', asyncHandler(async (req: Request, res: Re
     [documentId]
   );
 
-  res.json({ snapshots: snapshots.rows });
+  res.json({
+    snapshots: snapshots.rows.map((s) => ({
+      ...s,
+      scrivener_title: s.trigger === 'manual' ? doc.snapshot_index[new Date(s.created_at).toISOString()] ?? null : null,
+    })),
+  });
 }));
 
 /**
